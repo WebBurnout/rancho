@@ -1,0 +1,1 @@
+"""Rancho alarm service."""

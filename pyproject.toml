@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rancho"
+version = "0.1.0"
+description = "Asyncio alarm service for Rancho"
+requires-python = ">=3.11"
+dependencies = ["python-dotenv>=1.0,<2"]
+
+[project.scripts]
+rancho = "rancho.__main__:main"
+
+[dependency-groups]
+dev = ["taskipy>=1.14,<2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.taskipy.tasks]
+restart = "sudo systemctl restart rancho.service"

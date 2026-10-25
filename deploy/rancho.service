@@ -1,0 +1,29 @@
+[Unit]
+Description=Rancho alarm service
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=tim
+Group=tim
+WorkingDirectory=/home/tim/rancho
+ExecStart=/home/tim/rancho/.venv/bin/python -m rancho
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Python reads .env in WorkingDirectory; state.json will also live there.
+UMask=0077
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rancho
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/tim/rancho
+
+[Install]
+WantedBy=multi-user.target
