@@ -7,7 +7,7 @@ import signal
 from rancho.core.cameras import Cameras
 from rancho.core.config import Config
 from rancho.core.events import EventBus
-from rancho.core.state import AlarmState
+from rancho.core.state import Alarm
 from rancho.frontends.telegram import TelegramFrontend
 
 logger = logging.getLogger(__name__)
@@ -20,19 +20,18 @@ async def run(config: Config) -> None:
         loop.add_signal_handler(sig, stop.set)
 
     events = EventBus()
-    state = AlarmState()
+    alarm = Alarm(config.state_file, events)
+    alarm.load()
     cameras = Cameras(config, events)
-    telegram = TelegramFrontend(config, events, cameras)
+    telegram = TelegramFrontend(config, events, cameras, alarm)
     workers = {
+        asyncio.create_task(alarm.run(), name="alarm"),
         asyncio.create_task(telegram.run(), name="telegram"),
         asyncio.create_task(cameras.run(), name="cameras"),
     }
     stop_task = asyncio.create_task(stop.wait(), name="shutdown")
     try:
-        logger.info(
-            "Rancho started (mode=%s; state persistence not implemented)",
-            state.mode.value,
-        )
+        logger.info("Rancho started (mode=%s)", alarm.mode.value)
         done, _ = await asyncio.wait(
             workers | {stop_task}, return_when=asyncio.FIRST_COMPLETED
         )

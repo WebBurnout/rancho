@@ -97,3 +97,32 @@ Expect `active`, shutdown messages (`Rancho stopping`, `Telegram stopped`,
 
 Send `/ayuda` in an allowed group and expect the command list. See [README.md](README.md) for camera setup, `/foto`, and update/restart
 commands.
+
+## Homelab sentinel
+
+The sentinel runs on the Ubuntu homelab and alerts the group when the Pi stops
+answering ping. The homelab must be on the same tailnet with MagicDNS, so that
+`ping -c 1 rancho` works there. It needs Python 3.10+ at `/usr/bin/python3` and
+no extra packages. Run these on the homelab from a checkout of this repository:
+
+```sh
+sudo install -D -m 0644 sentinel/rancho_sentinel.py /opt/rancho-sentinel/rancho_sentinel.py
+sudo install -m 0644 sentinel/rancho-sentinel.service /etc/systemd/system/rancho-sentinel.service
+sudo install -m 0600 sentinel/rancho-sentinel.env.example /etc/rancho-sentinel.env
+sudoedit /etc/rancho-sentinel.env
+sysctl net.ipv4.ping_group_range
+sudo systemctl daemon-reload
+sudo systemctl enable --now rancho-sentinel.service
+sudo journalctl -u rancho-sentinel.service -n 20 --no-pager
+```
+
+In the env file, set the Pi's bot token and the group chat ID. The sysctl
+should print `0	2147483647` (the Ubuntu default). The service runs with
+`NoNewPrivileges`, so `ping` relies on that range instead of file capabilities.
+Expect `INFO Watching rancho every 30s` and no warnings. A `ping rancho failed:`
+warning means a DNS or permission problem.
+
+To test, stop the Pi's Tailscale for about 4 minutes (`sudo tailscale down` on
+the Pi, then `sudo tailscale up`, from a LAN session). Expect a "sin conexión"
+message, then "conectado de nuevo". To update, repeat the first `install` line
+and `sudo systemctl restart rancho-sentinel.service`.

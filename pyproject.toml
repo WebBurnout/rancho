@@ -26,3 +26,4 @@ pythonpath = ["."]
 [tool.taskipy.tasks]
 restart = "sudo systemctl restart rancho.service"
 test = "pytest"
+logs = "journalctl -u rancho.service -f -n 50"

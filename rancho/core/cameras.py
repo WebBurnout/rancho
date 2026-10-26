@@ -177,6 +177,14 @@ class Cameras:
             for camera in self._cameras:
                 tasks.create_task(camera.run(), name=f"camera-{camera.address}")
 
+    async def capture(self, name: str) -> Snapshot:
+        if not self.configured:
+            raise ValueError("Cameras need cameras.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
+        for camera in self._cameras:
+            if camera.name == name:
+                return await camera.snapshot()
+        raise KeyError(name)
+
     async def capture_all(self) -> list[Snapshot]:
         if not self.configured:
             raise ValueError("Cameras need cameras.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")

@@ -8,6 +8,11 @@ Home alarm system on a Raspberry Pi 4 (hostname `rancho`) for a rental house in 
 - Edits outside this repo require an explicit request (for example, updating `/home/tim/config/README.md`).
 - Keep it simple. I'm a developer; prefer code and config files over GUIs.
 
+## Tasks (taskipy, defined in pyproject.toml)
+- `uv run task test`: offline pytest suite (fakes for cameras, Telegram, and ping). The agent may run it.
+- `uv run task logs`: follow the service journal (`journalctl -u rancho.service -f -n 50`). Read-only; the agent may use `journalctl` without `-f` for inspection.
+- `uv run task restart`: `sudo systemctl restart rancho.service`. Only I run it.
+
 ## Why
 Thieves have stolen copper pipes and the water pump. Our power can be cut from outside, and grid outages are also frequent (usually 1–2 minutes). I want alerts with camera photos on my phone, a siren, and power-cut detection.
 
@@ -34,7 +39,7 @@ Thieves have stolen copper pipes and the water pump. Our power can be cut from o
 
 ## Alarm behavior (target)
 - States: disarmed, arming (exit delay), armed. Armed state persisted to a small file, written only on change. After a reboot, restore it and notify me on Telegram.
-- Person detected by any camera while armed -> snapshots from all cameras to Telegram + siren for 10 seconds, with a cooldown.
+- Person detected by any camera while armed -> photo from that camera to Telegram + siren for 10 seconds, with a per-camera cooldown. Nothing is sent while disarmed or arming.
 - Power cut -> Telegram alert with snapshots if it lasts longer than a configurable delay (short blips are common). Message when power returns, with the duration.
 - Camera unreachable for ~1 minute while power is present -> alert.
 - Telegram buttons: Arm, Disarm, Status, Photo, Siren off. Only allow-listed chat IDs can control it.

@@ -1,0 +1,30 @@
+[Unit]
+Description=Rancho sentinel: Telegram alert when the Pi stops answering ping
+Wants=network-online.target
+After=network-online.target tailscaled.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /opt/rancho-sentinel/rancho_sentinel.py
+# Only TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; everything else is in the script.
+EnvironmentFile=/etc/rancho-sentinel.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rancho-sentinel
+DynamicUser=yes
+# File capabilities are ignored under NoNewPrivileges; ping falls back to
+# unprivileged ICMP sockets (net.ipv4.ping_group_range, open by default on Ubuntu).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

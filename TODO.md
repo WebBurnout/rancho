@@ -3,11 +3,8 @@
 
 
 
-send pix from the cameras when there's a person detected
-
 squids does a ping to rancho and can alert if its down
 
-invite Santiago and Horacio
 
 
 
@@ -17,8 +14,7 @@ invite Santiago and Horacio
 
 
 
-
-needs an 'armed' state that activates the alert
+invite Santiago and Horacio to the chat
 
 buy a new telcel plan whenever this one expires (one month?)
 

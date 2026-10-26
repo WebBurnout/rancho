@@ -17,6 +17,21 @@ class PersonDetected(Event):
     name: str = field(default="person_detected", init=False)
 
 
+@dataclass(frozen=True, kw_only=True)
+class Intrusion(Event):
+    """A person detected while armed, outside the cooldown."""
+
+    camera: str
+    name: str = field(default="intrusion", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModeChanged(Event):
+    mode: str  # an AlarmMode value
+    by: str
+    name: str = field(default="mode_changed", init=False)
+
+
 class EventBus:
     """Broadcast to independent queues; queues are intentionally unbounded for now."""
 

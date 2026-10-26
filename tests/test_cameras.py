@@ -160,3 +160,11 @@ class CamerasTests(IsolatedAsyncioTestCase):
         results = await cameras.capture_all()
         self.assertIsNone(results[0].image)
         self.assertEqual(results[1].image, JPEG)
+
+    async def test_capture_takes_only_the_named_camera(self) -> None:
+        cameras = Cameras(config(), EventBus())
+        cameras._cameras[0].snapshot = AsyncMock()
+        cameras._cameras[1].snapshot = AsyncMock(return_value=Snapshot("Patio", image=JPEG))
+        result = await cameras.capture("Patio")
+        self.assertEqual(result.image, JPEG)
+        cameras._cameras[0].snapshot.assert_not_awaited()
