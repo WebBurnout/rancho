@@ -19,7 +19,6 @@ def main() -> None:
     except (OSError, ValueError) as exc:
         logging.getLogger(__name__).error("Configuration error: %s", exc)
         raise SystemExit(1) from None
-    logging.getLogger().setLevel(config.log_level)
     asyncio.run(run(config))
 
 

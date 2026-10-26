@@ -2,21 +2,12 @@
 
 
 
-config for cameras in a yaml file
-name the cameras
-
-review code
-
-missing camera password
-
-needs an 'armed' state
 
 send pix from the cameras when there's a person detected
 
-buy a new telcel plan whenever this one expires (one month?)
-
 squids does a ping to rancho and can alert if its down
 
+invite Santiago and Horacio
 
 
 
@@ -27,17 +18,26 @@ squids does a ping to rancho and can alert if its down
 
 
 
+needs an 'armed' state that activates the alert
 
-home assistant: can sense power cut
+buy a new telcel plan whenever this one expires (one month?)
 
-home assistant: can turn on siren
+missing camera password
+
+can sense power cut
+
+can turn on siren
 
 alerts on power outage with pics
 
 
 
 
+
 ## later
-home assistant can sense mains cut
+can sense mains cut and ignores it
+
+
+
 
 

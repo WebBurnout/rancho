@@ -107,7 +107,8 @@ class TelegramFrontend:
             return
         if not self._cameras.configured:
             await _send_with_retry(lambda: message.reply_text(
-                "Configura CAMERA_USERNAME y CAMERA_PASSWORD en .env y reinicia Rancho."
+                "Configura las cámaras en cameras.yaml y CAMERA_USERNAME y "
+                "CAMERA_PASSWORD en .env, y reinicia Rancho."
             ))
             return
 
@@ -115,23 +116,22 @@ class TelegramFrontend:
         failures = []
         for snapshot in snapshots:
             if snapshot.image is None:
-                failures.append(f"{snapshot.host}: {snapshot.error}")
+                failures.append(f"{snapshot.camera}: {snapshot.error}")
                 continue
             try:
                 # Bind this snapshot for every retry. Images stay in memory.
                 async def send_photo(snapshot=snapshot):
                     return await message.reply_photo(
                         photo=snapshot.image,
-                        filename=f"{snapshot.host}.jpg",
-                        caption=f"{snapshot.host} — {snapshot.captured_at:%Y-%m-%d %H:%M:%S UTC}",
+                        filename=f"{snapshot.camera}.jpg",
                         connect_timeout=10,
                         write_timeout=60,
                         read_timeout=30,
                     )
                 await _send_with_retry(send_photo)
             except TelegramError as exc:
-                logger.warning("Photo upload failed for %s (%s)", snapshot.host, type(exc).__name__)
-                failures.append(f"{snapshot.host}: no se pudo enviar la foto a Telegram")
+                logger.warning("Photo upload failed for %s (%s)", snapshot.camera, type(exc).__name__)
+                failures.append(f"{snapshot.camera}: no se pudo enviar la foto a Telegram")
         if failures:
             report = "Algunas cámaras no pudieron enviar fotos:\n" + "\n".join(failures)
             await _send_with_retry(lambda: message.reply_text(report))

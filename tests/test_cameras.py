@@ -1,23 +1,23 @@
 """Offline camera adapter tests; no reolink client or network is created."""
 
 import asyncio
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
 from rancho.core.cameras import Cameras, Snapshot, _Camera
-from rancho.core.config import Config
+from rancho.core.config import CameraConfig, Config
 from rancho.core.events import EventBus, PersonDetected
 
 JPEG = b"\xff\xd8\xfftest-image"
+BOMBA = CameraConfig(name="Bomba", host="10.10.0.10")
 
 
 def config() -> Config:
     return Config(
-        log_level="INFO", state_file=Path("state.json"),
+        state_file=Path("state.json"),
         telegram_bot_token="test-token", telegram_allowed_chat_ids=frozenset({-123}),
-        camera_hosts=("10.10.0.10", "10.10.0.11"),
+        cameras=(BOMBA, CameraConfig(name="Patio", host="10.10.0.11")),
         camera_username="viewer", camera_password="test-password",
     )
 
@@ -38,7 +38,7 @@ def fake_client() -> Mock:
 class CameraTests(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.bus = EventBus()
-        self.camera = _Camera("10.10.0.10", config(), self.bus)
+        self.camera = _Camera(BOMBA, config(), self.bus)
         self.client = fake_client()
         self.camera._client = self.client
         self.camera._ready = True
@@ -73,6 +73,10 @@ class CameraTests(IsolatedAsyncioTestCase):
         self.assertIn("TimeoutError", result.error)
         self.assertNotIn("sensitive-password", result.error)
 
+    async def test_snapshot_is_labeled_with_camera_name(self) -> None:
+        result = await self.camera.snapshot()
+        self.assertEqual(result.camera, "Bomba")
+
     async def test_not_connected_does_not_request_image(self) -> None:
         self.camera._ready = False
         result = await self.camera.snapshot()
@@ -87,7 +91,7 @@ class CameraTests(IsolatedAsyncioTestCase):
         self.assertEqual(queue.qsize(), 2)
         event = queue.get_nowait()
         self.assertIsInstance(event, PersonDetected)
-        self.assertEqual(event.camera, "10.10.0.10")
+        self.assertEqual(event.camera, "Bomba")
         self.assertEqual(event.name, "person_detected")
         self.client.ai_detected.assert_called_with(0, "person")
 
@@ -116,7 +120,7 @@ class CameraTests(IsolatedAsyncioTestCase):
     async def test_worker_subscribes_and_cleans_up_on_cancel(self) -> None:
         subscribed = asyncio.Event()
         self.client.baichuan.subscribe_events.side_effect = lambda: subscribed.set()
-        camera = _Camera("10.10.0.10", config(), self.bus)
+        camera = _Camera(BOMBA, config(), self.bus)
         with patch("rancho.core.cameras._new_host", return_value=self.client):
             task = asyncio.create_task(camera.run())
             try:
@@ -136,7 +140,7 @@ class CameraTests(IsolatedAsyncioTestCase):
         closed = asyncio.Event()
         self.client.get_host_data.side_effect = TimeoutError()
         self.client.logout.side_effect = lambda: closed.set()
-        camera = _Camera("10.10.0.10", config(), self.bus)
+        camera = _Camera(BOMBA, config(), self.bus)
         with patch("rancho.core.cameras._new_host", return_value=self.client):
             task = asyncio.create_task(camera.run())
             try:
@@ -151,13 +155,8 @@ class CameraTests(IsolatedAsyncioTestCase):
 class CamerasTests(IsolatedAsyncioTestCase):
     async def test_one_failed_camera_does_not_discard_other_photo(self) -> None:
         cameras = Cameras(config(), EventBus())
-        now = datetime.now(timezone.utc)
-        cameras._cameras[0].snapshot = AsyncMock(return_value=Snapshot(
-            "10.10.0.10", now, error="offline"
-        ))
-        cameras._cameras[1].snapshot = AsyncMock(return_value=Snapshot(
-            "10.10.0.11", now, image=JPEG
-        ))
+        cameras._cameras[0].snapshot = AsyncMock(return_value=Snapshot("Bomba", error="offline"))
+        cameras._cameras[1].snapshot = AsyncMock(return_value=Snapshot("Patio", image=JPEG))
         results = await cameras.capture_all()
         self.assertIsNone(results[0].image)
         self.assertEqual(results[1].image, JPEG)

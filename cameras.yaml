@@ -1,0 +1,9 @@
+# Camera names appear in Telegram messages and alerts. Photos arrive in this order.
+# Credentials stay in .env (CAMERA_USERNAME / CAMERA_PASSWORD).
+cameras:
+  - name: Patio
+    host: 10.10.0.10
+  - name: Puerta
+    host: 10.10.0.11
+#  - name: Bomba
+#    host: 10.10.0.12

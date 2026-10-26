@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import logging
 from typing import TYPE_CHECKING
 
-from rancho.core.config import Config
+from rancho.core.config import CameraConfig, Config
 from rancho.core.events import EventBus, PersonDetected
 
 if TYPE_CHECKING:
@@ -21,8 +20,7 @@ CALLBACK_ID = "rancho-person"
 
 @dataclass(frozen=True)
 class Snapshot:
-    host: str
-    captured_at: datetime
+    camera: str
     image: bytes | None = field(default=None, repr=False)
     error: str | None = None
 
@@ -45,8 +43,11 @@ def _new_host(address: str, config: Config) -> Host:
 
 
 class _Camera:
-    def __init__(self, address: str, config: Config, events: EventBus) -> None:
-        self.address = address
+    def __init__(self, camera: CameraConfig, config: Config, events: EventBus) -> None:
+        self.name = camera.name
+        self.address = camera.host
+        # Log both: names are for people, addresses identify the device.
+        self.label = f"{camera.name} ({camera.host})"
         self._config = config
         self._events = events
         self._client: Host | None = None
@@ -61,13 +62,13 @@ class _Camera:
             return
         if not self._push_confirmed:
             self._push_confirmed = True
-            logger.info("Camera %s: native push received", self.address)
+            logger.info("Camera %s: native push received", self.label)
         detected = client.ai_detected(0, "person")
         if detected and self._person is not True:
-            logger.info("Camera %s: person detected", self.address)
-            self._events.publish(PersonDetected(camera=self.address))
+            logger.info("Camera %s: person detected", self.label)
+            self._events.publish(PersonDetected(camera=self.name))
         elif not detected and self._person is True:
-            logger.info("Camera %s: person cleared", self.address)
+            logger.info("Camera %s: person cleared", self.label)
         self._person = detected
 
     async def run(self) -> None:
@@ -78,15 +79,15 @@ class _Camera:
                     async with asyncio.timeout(90):
                         await self._client.get_host_data()
                     self._ready = True
-                logger.info("Camera %s: connected; snapshots ready", self.address)
+                logger.info("Camera %s: connected; snapshots ready", self.label)
                 if self._client.ai_supported(0, "person"):
                     self._client.baichuan.register_callback(
                         CALLBACK_ID, self._on_push, cmd_id=33, channel=0
                     )
                     await self._client.baichuan.subscribe_events()
-                    logger.info("Camera %s: native push subscription requested on port 9000", self.address)
+                    logger.info("Camera %s: native push subscription requested on port 9000", self.label)
                 else:
-                    logger.warning("Camera %s: person detection not advertised by firmware/account", self.address)
+                    logger.warning("Camera %s: person detection not advertised by firmware/account", self.label)
                 while True:
                     await asyncio.sleep(30)
                     if self._client.ai_supported(0, "person"):
@@ -102,7 +103,7 @@ class _Camera:
                 raise
             except Exception as exc:
                 # Library exceptions/URLs may contain credentials: log types only.
-                logger.warning("Camera %s: connection failed (%s); retrying in 10s", self.address, type(exc).__name__)
+                logger.warning("Camera %s: connection failed (%s); retrying in 10s", self.label, type(exc).__name__)
             finally:
                 await self._close()
             await asyncio.sleep(10)
@@ -120,22 +121,22 @@ class _Camera:
                 async with asyncio.timeout(5):
                     await client.baichuan.unsubscribe_events()
             except Exception as exc:
-                logger.warning("Camera %s: unsubscribe failed (%s)", self.address, type(exc).__name__)
+                logger.warning("Camera %s: unsubscribe failed (%s)", self.label, type(exc).__name__)
             finally:
                 try:
                     async with asyncio.timeout(5):
                         await client.logout()
                 except Exception as exc:
-                    logger.warning("Camera %s: logout failed (%s)", self.address, type(exc).__name__)
+                    logger.warning("Camera %s: logout failed (%s)", self.label, type(exc).__name__)
 
     async def snapshot(self) -> Snapshot:
         if not self._ready:
-            return Snapshot(self.address, datetime.now(timezone.utc), error="aún no conectada")
+            return Snapshot(self.name, error="aún no conectada")
         # Serialize snapshot requests against startup/cleanup of the shared Host.
         # TCP push callbacks do not need this lock.
         async with self._lock:
             if not self._ready or self._client is None:
-                return Snapshot(self.address, datetime.now(timezone.utc), error="aún no conectada")
+                return Snapshot(self.name, error="aún no conectada")
             try:
                 async with asyncio.timeout(20):
                     image = await self._client.get_snapshot(0)
@@ -144,17 +145,17 @@ class _Camera:
                 elif len(image) > MAX_IMAGE_BYTES:
                     error = "la foto es demasiado grande para enviarla"
                 else:
-                    return Snapshot(self.address, datetime.now(timezone.utc), image=image)
+                    return Snapshot(self.name, image=image)
             except Exception as exc:
                 error = f"falló la foto ({type(exc).__name__}); revisa el acceso y las credenciales de la cámara"
-            logger.warning("Camera %s: %s", self.address, error)
-            return Snapshot(self.address, datetime.now(timezone.utc), error=error)
+            logger.warning("Camera %s: %s", self.label, error)
+            return Snapshot(self.name, error=error)
 
 
 class Cameras:
     def __init__(self, config: Config, events: EventBus) -> None:
         self._config = config
-        self._cameras = [_Camera(address, config, events) for address in config.camera_hosts]
+        self._cameras = [_Camera(camera, config, events) for camera in config.cameras]
 
     @property
     def configured(self) -> bool:
@@ -164,6 +165,10 @@ class Cameras:
         # Keep library debug output off: it can include API URLs and payloads.
         # Our adapter reports camera addresses and exception types instead.
         logging.getLogger("reolink_aio").setLevel(logging.CRITICAL)
+        if not self._cameras:
+            logger.warning("Cameras disabled: no cameras in cameras.yaml")
+            await asyncio.Future()
+            return
         if not self.configured:
             logger.warning("Cameras disabled: set CAMERA_USERNAME and CAMERA_PASSWORD in .env")
             await asyncio.Future()
@@ -174,5 +179,5 @@ class Cameras:
 
     async def capture_all(self) -> list[Snapshot]:
         if not self.configured:
-            raise ValueError("Set CAMERA_USERNAME and CAMERA_PASSWORD in .env")
+            raise ValueError("Cameras need cameras.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
         return list(await asyncio.gather(*(camera.snapshot() for camera in self._cameras)))

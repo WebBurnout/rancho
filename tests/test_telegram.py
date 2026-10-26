@@ -1,6 +1,5 @@
 """Offline tests: no real token, polling, network, or hardware access."""
 
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
@@ -17,7 +16,6 @@ from rancho.frontends.telegram import HELP_TEXT, TelegramFrontend
 class HelpTests(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         config = Config(
-            log_level="INFO",
             state_file=Path("state.json"),
             telegram_bot_token="test-token",
             telegram_allowed_chat_ids=frozenset({-123}),
@@ -62,7 +60,7 @@ class HelpTests(IsolatedAsyncioTestCase):
 class PhotoTests(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         config = Config(
-            log_level="INFO", state_file=Path("state.json"),
+            state_file=Path("state.json"),
             telegram_bot_token="test-token", telegram_allowed_chat_ids=frozenset({-123}),
         )
         self.cameras = Mock(configured=True, capture_all=AsyncMock())
@@ -86,23 +84,22 @@ class PhotoTests(IsolatedAsyncioTestCase):
         self.assertIn("CAMERA_USERNAME", self.message.reply_text.call_args.args[0])
 
     async def test_sends_available_photo_and_reports_failed_camera(self) -> None:
-        now = datetime.now(timezone.utc)
         self.cameras.capture_all.return_value = [
-            Snapshot("10.10.0.10", now, image=b"jpeg"),
-            Snapshot("10.10.0.11", now, error="unreachable"),
+            Snapshot("Bomba", image=b"jpeg"),
+            Snapshot("Patio", error="unreachable"),
         ]
         await self.frontend._photo(self.update, None)
         self.message.reply_photo.assert_awaited_once()
         self.assertEqual(self.message.reply_photo.call_args.kwargs["photo"], b"jpeg")
-        self.assertIn("10.10.0.11: unreachable", self.message.reply_text.call_args.args[0])
+        self.assertNotIn("caption", self.message.reply_photo.call_args.kwargs)
+        self.assertIn("Patio: unreachable", self.message.reply_text.call_args.args[0])
 
     async def test_failed_upload_does_not_block_other_photos(self) -> None:
-        now = datetime.now(timezone.utc)
         self.cameras.capture_all.return_value = [
-            Snapshot("10.10.0.10", now, image=b"first"),
-            Snapshot("10.10.0.11", now, image=b"second"),
+            Snapshot("Bomba", image=b"first"),
+            Snapshot("Patio", image=b"second"),
         ]
         self.message.reply_photo.side_effect = [BadRequest("invalid image"), None]
         await self.frontend._photo(self.update, None)
         self.assertEqual(self.message.reply_photo.await_count, 2)
-        self.assertIn("10.10.0.10: no se pudo enviar la foto a Telegram", self.message.reply_text.call_args.args[0])
+        self.assertIn("Bomba: no se pudo enviar la foto a Telegram", self.message.reply_text.call_args.args[0])
