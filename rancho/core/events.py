@@ -11,6 +11,12 @@ class Event:
     occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+@dataclass(frozen=True, kw_only=True)
+class PersonDetected(Event):
+    camera: str
+    name: str = field(default="person_detected", init=False)
+
+
 class EventBus:
     """Broadcast to independent queues; queues are intentionally unbounded for now."""
 

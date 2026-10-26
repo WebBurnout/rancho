@@ -1,78 +1,99 @@
+# Install Rancho on a Raspberry Pi
 
-Flash a new Raspberry Pi OS image. Make sure it's the "lite" version with no GUI. Add the user and ssh keys per wizard instructions.
+Run these steps on the Pi as `tim`. The checkout and service use
+`/home/tim/rancho`, on a filesystem available at boot.
 
-It will take a long time to boot the first time. Once you're in, setup passwordless sudo:
+## 1. Prepare the Pi and Linux environment
 
-```
-echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/010-$USER-nopasswd
-sudo chmod 440 /etc/sudoers.d/010-$USER-nopasswd
-sudo visudo -c
-```
+Flash **Raspberry Pi OS Lite (64-bit)** with Raspberry Pi Imager. Set the hostname
+to `rancho`, create the `tim` user, and enable SSH with your public key. Boot the
+Pi and connect over SSH; the first boot can take several minutes.
 
-Turn off password auth in ssh:
+Follow [Linux setup in the config repository](../config/README.md#linux-setup)
+for GitHub access, sudo, SSH, locale, shell/editor configuration, Node.js/pi, and
+Tailscale. That guide clones the config repository to `/home/tim/config`.
 
-```
-echo "PasswordAuthentication no" | sudo tee /etc/ssh/sshd_config.d/no-passwords.conf
-sudo systemctl restart ssh
-```
+## 2. Clone Rancho
 
-If you got errors about the locale when logging in run this:
-
-```
-sudo sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-sudo locale-gen
-sudo update-locale LANG=en_US.UTF-8
+```sh
+cd /home/tim
+git clone git@github.com:WebBurnout/rancho.git
+cd rancho
 ```
 
-Install node:
+If the checkout already exists, use `cd /home/tim/rancho` instead.
 
-```
-sudo apt update && sudo apt install -y curl
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-sudo apt install -y nodejs
-node --version
-```
+## 3. Install Python and uv
 
-And `pi`:
-
-```
-sudo npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-mkdir ~/.pi
-ln -s ~/config/pi ~/.pi/agent
-pi --version
+```sh
+sudo apt-get update
+sudo apt-get install -y python3 curl ca-certificates
+python3 --version
+curl -LsSf https://astral.sh/uv/install.sh -o /tmp/rancho-install-uv.sh
+UV_INSTALL_DIR="$HOME/.local/bin" sh /tmp/rancho-install-uv.sh
+sudo install -m 0755 "$HOME/.local/bin/uv" /usr/local/bin/uv
+uv --version
 ```
 
-Generate an SSH key:
+Expect apt/installer output, **Python 3.11 or newer**, and a uv version. If Python
+is older, stop before continuing. If uv is already on PATH, skip its installation.
 
-```
-ssh-keygen -t ed25519 -C "rancho"
-```
+## 4. Prepare configuration and dependencies
 
-Add the public key to GitHub. Install git and clone the repo:
-
-```
-sudo apt install git
-git clone git@github.com:WebBurnout/config.git
-```
-
-Install neovim and get the config:
-
-```
-sudo apt install neovim
-mkdir -p ~/.config
-ln -s ~/config/nvim ~/.config/nvim
+```sh
+cd /home/tim/rancho
+if [ ! -e .env ]; then cp .env.example .env; fi
+chmod 600 .env
+uv sync --locked --python /usr/bin/python3 --no-python-downloads
 ```
 
-Install tailscal
-```
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
+Existing `.env` contents are preserved. Edit secrets in `.env`; `.env.example` is
+the tracked template. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_IDS`
+to enable the bot; IDs are comma-separated integers. Blank settings leave Telegram
+disabled.
+Relative state paths are resolved against the directory containing `.env`; the
+default is `state.json` in the checkout.
+
+Expect uv to create `.venv` and install `python-dotenv`, `python-telegram-bot`,
+`reolink-aio`, Taskipy, and dependencies from `uv.lock`. Taskipy is in the default
+`dev` group. Run uv as `tim`.
+
+## 5. Link and start the service
+
+```sh
+sudo ln -sfn /home/tim/rancho/deploy/rancho.service /etc/systemd/system/rancho.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now rancho.service
+sudo systemctl status rancho.service --no-pager
+sudo journalctl -u rancho.service -n 20 --no-pager
 ```
 
-Then remove key expiry.
+Expect `active (running)` and journal lines like:
 
-Setup git config
-```
-ln -s ~/config/gitconfig ~/.gitconfig
+```text
+INFO rancho.app: Rancho started (mode=disarmed; state persistence not implemented)
+INFO rancho.frontends.telegram: Telegram polling started; try /ayuda in an allowed chat
 ```
 
+If status is failed or restarting, inspect the journal before continuing.
+
+The service runs as `tim`, invoking `.venv/bin/python -m rancho` with the checkout
+as its working directory. It loads `.env` there. Logs go to journald using the Pi's
+existing retention settings. The service is enabled for boot and systemd restarts
+it after unexpected exits.
+
+## 6. Verify the restart task
+
+```sh
+cd /home/tim/rancho
+uv run --frozen --no-sync task restart
+sudo systemctl is-active rancho.service
+sudo journalctl -u rancho.service -n 15 --no-pager
+```
+
+Expect `active`, shutdown messages (`Rancho stopping`, `Telegram stopped`,
+`Rancho stopped`), then startup messages again. Taskipy invokes
+`sudo systemctl restart rancho.service`.
+
+Send `/ayuda` in an allowed group and expect the command list. See [README.md](README.md) for camera setup, `/foto`, and update/restart
+commands.

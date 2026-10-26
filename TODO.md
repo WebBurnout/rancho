@@ -2,10 +2,12 @@
 
 
 
+config for cameras in a yaml file
+name the cameras
 
+review code
 
-
-telegram bot
+missing camera password
 
 needs an 'armed' state
 

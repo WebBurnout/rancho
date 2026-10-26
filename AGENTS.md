@@ -3,7 +3,9 @@
 Home alarm system on a Raspberry Pi 4 (hostname `rancho`) for a rental house in rural Mexico.
 
 ## Rules for the agent
-- Do not run any commands. Only write and edit files in this repo. When something needs to be run, tell me exactly what to run, and I'll run it and report back.
+- You are running on the Pi itself. Read-only inspection commands are allowed (for example `pwd`, `ls`, `find`, `rg`, `git status`, and `git diff`). Use the read tool for file contents. Avoid exposing secrets in command output.
+- Write and edit project files as requested. Do not run commands that install/update dependencies, change system configuration or permissions, start/stop/restart services, modify Git history, or access/control alarm hardware. Do not launch the alarm service or tests that could affect the running system. Give me the exact commands for those operations; I'll run them and report back.
+- Edits outside this repo require an explicit request (for example, updating `/home/tim/config/README.md`).
 - Keep it simple. I'm a developer; prefer code and config files over GUIs.
 
 ## Why
