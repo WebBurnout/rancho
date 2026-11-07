@@ -3,16 +3,10 @@
 
 
 
-squids does a ping to rancho and can alert if its down
 
+test squids ping message
 
-
-
-
-
-
-
-
+replace sim card
 
 invite Santiago and Horacio to the chat
 
@@ -22,18 +16,13 @@ missing camera password
 
 can sense power cut
 
-can turn on siren
-
 alerts on power outage with pics
 
+can turn on siren
 
+can sense mains cut and ignores power cut in that case
 
-
-
-## later
-can sense mains cut and ignores it
-
-
+possible to arm when i leave or disarm when i arrive?
 
 
 

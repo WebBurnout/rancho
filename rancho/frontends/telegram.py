@@ -12,17 +12,18 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from rancho.core.cameras import Cameras
 from rancho.core.config import Config
 from rancho.core.events import Event, EventBus, Intrusion, ModeChanged
-from rancho.core.state import Alarm, AlarmMode
+from rancho.core.state import MAX_SLEEP_HOURS, Alarm, AlarmMode
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 HELP_TEXT = (
     "Comandos:\n"
-    "/armar — arma la alarma (60 s para salir)\n"
-    "/desarmar — desarma la alarma\n"
+    "/armar — activar la alarma\n"
+    "/desarmar — desactivar la alarma\n"
     "/estado — estado de la alarma\n"
     "/foto — fotos de todas las cámaras\n"
+    "/pausa 1 — pausa las alertas 1 hora (/pausa 0 las reactiva)\n"
     "/ayuda — muestra esta lista"
 )
 # Buttons send the command name as callback data.
@@ -32,6 +33,8 @@ KEYBOARD = InlineKeyboardMarkup([
     [InlineKeyboardButton("Estado", callback_data="estado"),
      InlineKeyboardButton("Foto", callback_data="foto")],
 ])
+# Set to KEYBOARD to attach the buttons to every message again.
+REPLY_MARKUP: InlineKeyboardMarkup | None = None
 # Uploads can be slow on Telcel; keep these generous.
 PHOTO_TIMEOUTS = {"connect_timeout": 10, "write_timeout": 60, "read_timeout": 30}
 # Alerts retry for ~30s in total so they survive a Starlink/Telcel failover.
@@ -98,6 +101,7 @@ class TelegramFrontend:
         application.add_handler(CommandHandler("desarmar", self._disarm))
         application.add_handler(CommandHandler("estado", self._status))
         application.add_handler(CommandHandler("foto", self._photo))
+        application.add_handler(CommandHandler("pausa", self._pause))
         application.add_handler(CommandHandler(["ayuda", "start"], self._help))
         application.add_handler(CallbackQueryHandler(self._button))
         application.add_error_handler(self._handle_error)
@@ -140,7 +144,7 @@ class TelegramFrontend:
             return
         for chat_id in self._config.telegram_allowed_chat_ids:
             await _send_with_retry(lambda: bot.send_photo(
-                chat_id, snapshot.image, caption=text, reply_markup=KEYBOARD,
+                chat_id, snapshot.image, caption=text, reply_markup=REPLY_MARKUP,
                 filename=f"{snapshot.camera}.jpg", **PHOTO_TIMEOUTS,
             ), ALERT_ATTEMPTS)
 
@@ -156,25 +160,26 @@ class TelegramFrontend:
     async def _broadcast(self, bot: Bot, text: str) -> None:
         for chat_id in self._config.telegram_allowed_chat_ids:
             await _send_with_retry(
-                lambda: bot.send_message(chat_id, text, reply_markup=KEYBOARD), ALERT_ATTEMPTS
+                lambda: bot.send_message(chat_id, text, reply_markup=REPLY_MARKUP), ALERT_ATTEMPTS
             )
 
     def _mode_changed_text(self, event: ModeChanged) -> str:
-        if event.mode == AlarmMode.ARMING:
-            return f"Armando… se arma en {self._alarm.exit_delay:g} s ({event.by})"
         if event.mode == AlarmMode.ARMED:
-            return "Alarma armada"
+            return f"Alarma armada ({event.by})"
         return f"Alarma desarmada ({event.by})"
 
     def _status_text(self) -> str:
         alarm = self._alarm
         label = {
             AlarmMode.DISARMED: "Alarma desarmada",
-            AlarmMode.ARMING: "Armando la alarma",
             AlarmMode.ARMED: "Alarma armada",
         }[alarm.mode]
         text = f"{label} desde {alarm.since:%d/%m %H:%M}"
-        return f"{text} ({alarm.by})" if alarm.by else text
+        if alarm.by:
+            text += f" ({alarm.by})"
+        if alarm.sleeping and alarm.sleep_until is not None:
+            text += f"\nAlertas en pausa hasta {alarm.sleep_until:%d/%m %H:%M}"
+        return text
 
     def _allowed_message(self, update: Update) -> Message | None:
         chat = update.effective_chat
@@ -209,9 +214,9 @@ class TelegramFrontend:
             return
         # On success, the ModeChanged broadcast is the reply.
         if not self._alarm.arm(self._who(update)):
-            text = ("La alarma ya se está armando." if self._alarm.mode == AlarmMode.ARMING
-                    else "La alarma ya está armada.")
-            await _send_with_retry(lambda: message.reply_text(text, reply_markup=KEYBOARD))
+            await _send_with_retry(lambda: message.reply_text(
+                "La alarma ya está armada.", reply_markup=REPLY_MARKUP
+            ))
 
     async def _disarm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = self._allowed_message(update)
@@ -219,20 +224,41 @@ class TelegramFrontend:
             return
         if not self._alarm.disarm(self._who(update)):
             await _send_with_retry(lambda: message.reply_text(
-                "La alarma ya está desarmada.", reply_markup=KEYBOARD
+                "La alarma ya está desarmada.", reply_markup=REPLY_MARKUP
             ))
 
     async def _status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = self._allowed_message(update)
         if message is None:
             return
-        await _send_with_retry(lambda: message.reply_text(self._status_text(), reply_markup=KEYBOARD))
+        await _send_with_retry(lambda: message.reply_text(self._status_text(), reply_markup=REPLY_MARKUP))
 
     async def _help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = self._allowed_message(update)
         if message is None:
             return
-        await _send_with_retry(lambda: message.reply_text(HELP_TEXT, reply_markup=KEYBOARD))
+        await _send_with_retry(lambda: message.reply_text(HELP_TEXT, reply_markup=REPLY_MARKUP))
+
+    async def _pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = self._allowed_message(update)
+        if message is None:
+            return
+        args = context.args or []
+        who = self._who(update)
+        try:
+            hours = float(args[0]) if args else 1.0
+            self._alarm.sleep(hours, who)
+        except ValueError:
+            await _send_with_retry(lambda: message.reply_text(
+                f"Uso: /pausa <horas>, de 0 a {MAX_SLEEP_HOURS}. Ejemplo: /pausa 1",
+                reply_markup=REPLY_MARKUP,
+            ))
+            return
+        until = self._alarm.sleep_until
+        # Silencing alerts concerns every allowed chat, like a mode change.
+        text = (f"Alertas reactivadas ({who})" if until is None
+                else f"Alertas en pausa hasta {until:%H:%M} ({who})")
+        await self._broadcast(context.bot, text)
 
     async def _photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = self._allowed_message(update)

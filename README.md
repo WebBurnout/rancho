@@ -35,25 +35,29 @@ using it must send messages only.
 
 | Command | Button | |
 |---|---|---|
-| `/armar` | Armar | Starts a 60 s exit delay, then arms |
-| `/desarmar` | Desarmar | Disarms, also during the exit delay |
-| `/estado` | Estado | Mode, since when, and who changed it |
+| `/armar` | Armar | Arms immediately |
+| `/desarmar` | Desarmar | Disarms |
+| `/estado` | Estado | Mode, since when, who changed it, and any alert pause |
 | `/foto` | Foto | Photos from all cameras |
+| `/pausa <hours>` | | Pauses intrusion alerts (default 1, max 24); `/pausa 0` or arming resumes them |
 | `/ayuda` | | Command list |
 
-The buttons are attached to the bot's replies, alerts, and mode-change messages.
-Mode changes are posted to every allowed chat with the person's Telegram name
-(“Armando… se arma en 60 s (Tim)”, “Alarma armada”, “Alarma desarmada (Tim)”).
+Buttons are off: messages are sent without them. To bring them back, set
+`REPLY_MARKUP = KEYBOARD` in `rancho/frontends/telegram.py`. Button presses are
+still handled, so buttons on older messages keep working.
+Mode changes and alert pauses are posted to every allowed chat with the
+person's Telegram name (“Alarma armada (Tim)”, “Alarma desarmada (Tim)”,
+“Alertas en pausa hasta 15:30 (Tim)”).
 
 While armed, a person detected by a camera sends “Persona detectada: <camera>”
 with that camera's photo. Each camera alerts at most once a minute. Nothing is
-sent while disarmed or during the exit delay. Exit delay and cooldown are
+sent while disarmed or while alerts are paused with `/pausa`. Arming ends the
+pause. It is kept in memory only, so a restart also resumes alerts. Cooldown and the maximum pause are
 constants in `rancho/core/state.py`.
 
 The mode is saved to `state.json` next to `.env`, only when it changes (temp
 file, fsync, rename). On start, Rancho restores it and posts “Rancho
-reiniciado.” with the current mode. A stop during the exit delay restores as
-armed. A missing file starts disarmed; an unreadable file also starts disarmed
+reiniciado.” with the current mode. A missing file starts disarmed; an unreadable file also starts disarmed
 and the restart message says so.
 
 ## Sentinel (homelab)
@@ -152,7 +156,7 @@ uv run --frozen --no-sync task test
 
 These tests replace the Reolink clients and Telegram sending, and exercise
 snapshots, push transitions, cleanup, partial failures, the chat allow-list,
-send retries, alarm modes, exit delay, cooldown, state persistence, and the sentinel's down/up alerts with faked ping. They do not open camera connections.
+send retries, alarm modes, alert sleep, cooldown, state persistence, and the sentinel's down/up alerts with faked ping. They do not open camera connections.
 
 ## Deploy an update
 

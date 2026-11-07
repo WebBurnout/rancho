@@ -12,7 +12,7 @@ from rancho.core.cameras import Snapshot
 from rancho.core.config import Config
 from rancho.core.events import EventBus, Intrusion, ModeChanged
 from rancho.core.state import Alarm, AlarmMode
-from rancho.frontends.telegram import HELP_TEXT, KEYBOARD, TelegramFrontend
+from rancho.frontends.telegram import HELP_TEXT, TelegramFrontend
 
 
 class HelpTests(IsolatedAsyncioTestCase):
@@ -33,7 +33,7 @@ class HelpTests(IsolatedAsyncioTestCase):
 
     async def test_allowed_group_gets_help(self) -> None:
         await self.frontend._help(self.update(-123), None)
-        self.message.reply_text.assert_awaited_once_with(HELP_TEXT, reply_markup=KEYBOARD)
+        self.message.reply_text.assert_awaited_once_with(HELP_TEXT, reply_markup=None)
         self.assertIn("/foto", HELP_TEXT)
 
     async def test_other_chat_is_ignored(self) -> None:
@@ -154,14 +154,16 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
             telegram_bot_token="test-token", telegram_allowed_chat_ids=frozenset({-123}),
         )
         self.bus = EventBus()
-        self.alarm = Alarm(config.state_file, self.bus, exit_delay=3600)
+        self.alarm = Alarm(config.state_file, self.bus)
         self.frontend = TelegramFrontend(config, self.bus, Mock(), self.alarm)
         self.message = SimpleNamespace(reply_text=AsyncMock())
         self.bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
 
     def tearDown(self) -> None:
-        self.alarm.disarm("test")
         self.tmp.cleanup()
+
+    def context(self, *args: str) -> SimpleNamespace:
+        return SimpleNamespace(args=list(args), bot=self.bot)
 
     def update(self, chat_id: int = -123, data: str | None = None) -> SimpleNamespace:
         return SimpleNamespace(
@@ -171,18 +173,18 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
             callback_query=SimpleNamespace(data=data, answer=AsyncMock()),
         )
 
-    async def test_arm_starts_exit_delay_and_names_who(self) -> None:
+    async def test_arm_is_immediate_and_names_who(self) -> None:
         events = self.bus.subscribe()
         await self.frontend._arm(self.update(), None)
-        self.assertEqual(self.alarm.mode, AlarmMode.ARMING)
+        self.assertEqual(self.alarm.mode, AlarmMode.ARMED)
         event = events.get_nowait()
-        self.assertEqual(self.frontend._mode_changed_text(event), "Armando… se arma en 3600 s (Tim)")
+        self.assertEqual(self.frontend._mode_changed_text(event), "Alarma armada (Tim)")
         self.message.reply_text.assert_not_awaited()
 
-    async def test_arm_twice_says_already_arming(self) -> None:
+    async def test_arm_twice_says_already_armed(self) -> None:
         await self.frontend._arm(self.update(), None)
         await self.frontend._arm(self.update(), None)
-        self.assertIn("ya se está armando", self.message.reply_text.call_args.args[0])
+        self.assertIn("ya está armada", self.message.reply_text.call_args.args[0])
 
     async def test_disarm_when_disarmed_says_so(self) -> None:
         await self.frontend._disarm(self.update(), None)
@@ -196,14 +198,45 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
         self.alarm.arm("Horacio")
         await self.frontend._status(self.update(), None)
         text = self.message.reply_text.call_args.args[0]
-        self.assertTrue(text.startswith("Armando la alarma desde "))
+        self.assertTrue(text.startswith("Alarma armada desde "))
         self.assertTrue(text.endswith("(Horacio)"))
+
+    async def test_sleep_broadcasts_and_shows_in_status(self) -> None:
+        await self.frontend._pause(self.update(), self.context("1"))
+        self.assertTrue(self.alarm.sleeping)
+        text = self.bot.send_message.call_args.args[1]
+        self.assertTrue(text.startswith("Alertas en pausa hasta "))
+        self.assertTrue(text.endswith("(Tim)"))
+        await self.frontend._status(self.update(), None)
+        self.assertIn("Alertas en pausa hasta", self.message.reply_text.call_args.args[0])
+
+    async def test_sleep_defaults_to_one_hour(self) -> None:
+        await self.frontend._pause(self.update(), self.context())
+        self.assertTrue(self.alarm.sleeping)
+
+    async def test_sleep_zero_resumes_alerts(self) -> None:
+        await self.frontend._pause(self.update(), self.context("1"))
+        await self.frontend._pause(self.update(), self.context("0"))
+        self.assertFalse(self.alarm.sleeping)
+        self.assertEqual(self.bot.send_message.call_args.args[1], "Alertas reactivadas (Tim)")
+
+    async def test_sleep_with_bad_hours_shows_usage(self) -> None:
+        for arg in ("una", "-1", "100"):
+            with self.subTest(arg):
+                await self.frontend._pause(self.update(), self.context(arg))
+                self.assertIn("Uso: /pausa", self.message.reply_text.call_args.args[0])
+        self.assertFalse(self.alarm.sleeping)
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_other_chat_cannot_sleep(self) -> None:
+        await self.frontend._pause(self.update(chat_id=456), self.context("1"))
+        self.assertFalse(self.alarm.sleeping)
 
     async def test_button_runs_command_and_answers_query(self) -> None:
         update = self.update(data="armar")
         await self.frontend._button(update, None)
         update.callback_query.answer.assert_awaited_once()
-        self.assertEqual(self.alarm.mode, AlarmMode.ARMING)
+        self.assertEqual(self.alarm.mode, AlarmMode.ARMED)
 
     async def test_button_from_other_chat_is_ignored(self) -> None:
         update = self.update(chat_id=456, data="armar")
@@ -211,10 +244,10 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
         update.callback_query.answer.assert_not_awaited()
         self.assertEqual(self.alarm.mode, AlarmMode.DISARMED)
 
-    async def test_mode_change_is_broadcast_with_buttons(self) -> None:
+    async def test_mode_change_is_broadcast_without_buttons(self) -> None:
         await self.frontend._handle_event(self.bot, ModeChanged(mode=AlarmMode.DISARMED.value, by="Tim"))
         self.bot.send_message.assert_awaited_once_with(
-            -123, "Alarma desarmada (Tim)", reply_markup=KEYBOARD
+            -123, "Alarma desarmada (Tim)", reply_markup=None
         )
 
     async def test_restart_notice_reports_unreadable_state(self) -> None:
