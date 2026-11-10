@@ -1,5 +1,6 @@
 """Offline tests: no real token, polling, network, or hardware access."""
 
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from telegram.error import BadRequest, NetworkError
 
 from rancho.core.cameras import Snapshot
 from rancho.core.config import Config
-from rancho.core.events import EventBus, Intrusion, ModeChanged
+from rancho.core.events import CameraOffline, CameraOnline, EventBus, Intrusion, ModeChanged
 from rancho.core.state import Alarm, AlarmMode
 from rancho.frontends.telegram import HELP_TEXT, TelegramFrontend
 
@@ -144,6 +145,17 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         self.cameras.capture.side_effect = RuntimeError("boom")
         await self.frontend._handle_event(self.bot, Intrusion(camera="Patio"))
         self.bot.send_message.assert_not_awaited()
+
+    async def test_camera_offline_is_broadcast(self) -> None:
+        since = datetime(2026, 11, 10, 15, 16)
+        await self.frontend._handle_event(self.bot, CameraOffline(camera="Cocina", since=since))
+        self.assertEqual(self.bot.send_message.call_args.args,
+                         (-123, "Cámara sin conexión: Cocina (desde las 15:16)"))
+
+    async def test_camera_online_reports_duration(self) -> None:
+        await self.frontend._handle_event(self.bot, CameraOnline(camera="Cocina", down_seconds=3900))
+        self.assertEqual(self.bot.send_message.call_args.args,
+                         (-123, "Cámara reconectada: Cocina (sin conexión 1 h 5 min)"))
 
 
 class AlarmCommandTests(IsolatedAsyncioTestCase):

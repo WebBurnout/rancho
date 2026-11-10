@@ -11,7 +11,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from rancho.core.cameras import Cameras
 from rancho.core.config import Config
-from rancho.core.events import Event, EventBus, Intrusion, ModeChanged
+from rancho.core.events import CameraOffline, CameraOnline, Event, EventBus, Intrusion, ModeChanged
 from rancho.core.state import MAX_SLEEP_HOURS, Alarm, AlarmMode
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,13 @@ async def _send_with_retry(send: Callable[[], Awaitable[T]], attempts: int = 3) 
                 raise
             await asyncio.sleep(2 ** attempt)
     raise AssertionError("unreachable")
+
+
+def _duration(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60} min"
 
 
 class TelegramFrontend:
@@ -133,6 +140,12 @@ class TelegramFrontend:
                 await self._alert_intrusion(bot, event)
             elif isinstance(event, ModeChanged):
                 await self._broadcast(bot, self._mode_changed_text(event))
+            elif isinstance(event, CameraOffline):
+                await self._broadcast(bot, f"Cámara sin conexión: {event.camera} (desde las {event.since:%H:%M})")
+            elif isinstance(event, CameraOnline):
+                await self._broadcast(
+                    bot, f"Cámara reconectada: {event.camera} (sin conexión {_duration(event.down_seconds)})"
+                )
         except Exception as exc:
             logger.warning("Alert for %s failed (%s)", event.name, type(exc).__name__)
 

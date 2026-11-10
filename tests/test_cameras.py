@@ -5,9 +5,9 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
-from rancho.core.cameras import Cameras, Snapshot, _Camera
+from rancho.core.cameras import OFFLINE_AFTER, Cameras, Snapshot, _Camera
 from rancho.core.config import CameraConfig, Config
-from rancho.core.events import EventBus, PersonDetected
+from rancho.core.events import CameraOffline, CameraOnline, EventBus, PersonDetected
 
 JPEG = b"\xff\xd8\xfftest-image"
 BOMBA = CameraConfig(name="Bomba", host="10.10.0.10")
@@ -150,6 +150,63 @@ class CameraTests(IsolatedAsyncioTestCase):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
         self.client.logout.assert_awaited_once()
+
+
+class HealthTests(IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.bus = EventBus()
+        self.queue = self.bus.subscribe()
+        self.camera = _Camera(BOMBA, config(), self.bus)
+
+    async def test_short_outage_is_not_reported(self) -> None:
+        self.camera._check_health(False, 0)
+        self.camera._check_health(False, OFFLINE_AFTER - 1)
+        self.camera._check_health(True, OFFLINE_AFTER)
+        self.assertTrue(self.queue.empty())
+
+    async def test_long_outage_reports_once_then_recovery(self) -> None:
+        self.camera._check_health(False, 100)
+        for now in (100 + OFFLINE_AFTER, 200 + OFFLINE_AFTER, 300 + OFFLINE_AFTER):
+            self.camera._check_health(False, now)
+        offline = self.queue.get_nowait()
+        self.assertIsInstance(offline, CameraOffline)
+        self.assertEqual(offline.camera, "Bomba")
+        self.assertTrue(self.queue.empty())
+        self.camera._check_health(True, 400)
+        online = self.queue.get_nowait()
+        self.assertIsInstance(online, CameraOnline)
+        self.assertEqual(online.down_seconds, 300)
+        self.camera._check_health(True, 500)
+        self.assertTrue(self.queue.empty())
+
+    async def test_new_outage_after_recovery_is_reported_again(self) -> None:
+        for online, now in [(False, 0), (False, OFFLINE_AFTER), (True, 100),
+                            (False, 200), (False, 200 + OFFLINE_AFTER)]:
+            self.camera._check_health(online, now)
+        names = [self.queue.get_nowait().name for _ in range(self.queue.qsize())]
+        self.assertEqual(names, ["camera_offline", "camera_online", "camera_offline"])
+
+    async def test_not_ready_skips_probe_and_counts_as_down(self) -> None:
+        self.camera._reachable = AsyncMock(return_value=True)
+        self.camera._check_health = Mock()
+        with patch("rancho.core.cameras.asyncio.sleep", new=AsyncMock(side_effect=[None, asyncio.CancelledError])):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.camera.monitor()
+        self.camera._reachable.assert_not_awaited()
+        self.assertFalse(self.camera._check_health.call_args.args[0])
+
+    async def test_ready_and_reachable_counts_as_online(self) -> None:
+        self.camera._ready = True
+        self.camera._reachable = AsyncMock(return_value=True)
+        self.camera._check_health = Mock()
+        with patch("rancho.core.cameras.asyncio.sleep", new=AsyncMock(side_effect=[None, asyncio.CancelledError])):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.camera.monitor()
+        self.assertTrue(self.camera._check_health.call_args.args[0])
+
+    async def test_unreachable_when_connection_fails(self) -> None:
+        with patch("rancho.core.cameras.asyncio.open_connection", new=AsyncMock(side_effect=OSError())):
+            self.assertFalse(await self.camera._reachable())
 
 
 class CamerasTests(IsolatedAsyncioTestCase):

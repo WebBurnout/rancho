@@ -85,9 +85,10 @@ cameras. Snapshots are fetched concurrently, held in memory, and sent without
 captions, in the order of `cameras.yaml`. If one camera fails, the others still
 send, and a message names the camera that failed.
 
-1. Enable **HTTP** (port 80) and **Basic service** (port 9000) in each camera's
-   network/server settings. HTTP handles camera setup and snapshots; port 9000
-   carries native push events. RTSP and ONVIF can stay disabled.
+1. Enable **Basic service** (port 9000) in each camera's network/server
+   settings. The service talks to cameras only over this native Baichuan
+   protocol: setup, snapshots, and push events. HTTP, HTTPS, RTSP, and ONVIF
+   can stay disabled (some models, such as the E1, have no HTTP API).
 2. Set the shared credentials in `.env`:
 
 ```dotenv
@@ -105,8 +106,8 @@ fails initialization, verify with an admin account.
    an error identifying any camera that could not provide one.
 
 Keep camera access on the trusted LAN, keep their internet access blocked, and
-do not forward camera ports. Local HTTP is unencrypted; treat camera credentials
-and session tokens as secrets. Library debug output is suppressed, and our camera
+do not forward camera ports. Baichuan traffic is only weakly encrypted; treat
+camera credentials and session tokens as secrets. Library debug output is suppressed, and our camera
 adapter logs camera names, addresses, and error types rather than raw responses. Photos stay in
 memory and go to Telegram over HTTPS.
 
@@ -137,6 +138,17 @@ that walking in view produces a person event on **each** camera. Generic motion
 and repeated person-positive updates do not produce additional person events.
 After a disconnect, detection state is unknown; a new positive event may emit
 again. There is no periodic AI-state polling or siren trigger yet.
+
+### Offline alerts
+
+Every 15 s each camera is checked: it counts as online only if its session is
+up and it still accepts a TCP connection on port 9000 (the session alone can
+look alive after a silent power or cable loss). After 60 s offline, one
+`Cámara sin conexión` message goes to the allowed chats; when it returns,
+`Cámara reconectada` reports how long it was down. These alerts are sent
+whether the alarm is armed or not, including for a camera that never connects
+after a restart. The thresholds are `OFFLINE_AFTER` and `HEALTH_INTERVAL` in
+`rancho/core/cameras.py`.
 
 ## Tasks
 

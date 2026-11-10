@@ -26,6 +26,24 @@ class Intrusion(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class CameraOffline(Event):
+    """A camera has been unreachable for OFFLINE_AFTER; published once per outage."""
+
+    camera: str
+    since: datetime
+    name: str = field(default="camera_offline", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class CameraOnline(Event):
+    """A camera that was reported offline is reachable again."""
+
+    camera: str
+    down_seconds: float
+    name: str = field(default="camera_online", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
 class ModeChanged(Event):
     mode: str  # an AlarmMode value
     by: str

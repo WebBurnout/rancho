@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from rancho.core.config import CameraConfig, Config
-from rancho.core.events import EventBus, PersonDetected
+from rancho.core.events import CameraOffline, CameraOnline, EventBus, PersonDetected
 
 if TYPE_CHECKING:
     from reolink_aio.api import Host
@@ -16,6 +18,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 9 * 1024 * 1024
 CALLBACK_ID = "rancho-person"
+BAICHUAN_PORT = 9000
+# Seconds a camera must stay unreachable before alerting, and between checks.
+OFFLINE_AFTER = 60
+HEALTH_INTERVAL = 15
 
 
 @dataclass(frozen=True)
@@ -30,14 +36,14 @@ def _new_host(address: str, config: Config) -> Host:
     # factory and never instantiate the library's network clients.
     from reolink_aio.api import Host
 
+    # Baichuan (port 9000) only: setup, snapshots and push all work over it, and
+    # some models (E1) have no HTTP API at all.
     return Host(
         host=address,
         username=config.camera_username,
         password=config.camera_password,
-        port=80,
-        use_https=False,
-        protocol="http",
-        bc_port=9000,
+        bc_port=BAICHUAN_PORT,
+        bc_only=True,
         timeout=10,
     )
 
@@ -55,6 +61,10 @@ class _Camera:
         self._ready = False
         self._person: bool | None = None
         self._push_confirmed = False
+        # Monotonic time the current outage started; None while online.
+        self._down_since: float | None = None
+        self._down_at: datetime | None = None
+        self._offline_reported = False
 
     def _on_push(self) -> None:
         client = self._client
@@ -107,6 +117,45 @@ class _Camera:
             finally:
                 await self._close()
             await asyncio.sleep(10)
+
+    async def monitor(self) -> None:
+        while True:
+            await asyncio.sleep(HEALTH_INTERVAL)
+            # The session can look alive after a silent power or cable loss, so
+            # also confirm the camera still accepts TCP connections.
+            online = self._ready and await self._reachable()
+            self._check_health(online, time.monotonic())
+
+    async def _reachable(self) -> bool:
+        try:
+            async with asyncio.timeout(5):
+                _, writer = await asyncio.open_connection(self.address, BAICHUAN_PORT)
+        except (OSError, TimeoutError):
+            return False
+        writer.close()
+        try:
+            async with asyncio.timeout(5):
+                await writer.wait_closed()
+        except (OSError, TimeoutError):
+            pass
+        return True
+
+    def _check_health(self, online: bool, now: float) -> None:
+        if online:
+            if self._offline_reported and self._down_since is not None:
+                down = now - self._down_since
+                logger.info("Camera %s: back online after %.0fs", self.label, down)
+                self._events.publish(CameraOnline(camera=self.name, down_seconds=down))
+            self._down_since = self._down_at = None
+            self._offline_reported = False
+            return
+        if self._down_since is None:
+            self._down_since, self._down_at = now, datetime.now().astimezone()
+        if not self._offline_reported and now - self._down_since >= OFFLINE_AFTER:
+            self._offline_reported = True
+            logger.warning("Camera %s: offline for %.0fs", self.label, now - self._down_since)
+            assert self._down_at is not None
+            self._events.publish(CameraOffline(camera=self.name, since=self._down_at))
 
     async def _close(self) -> None:
         async with self._lock:
@@ -176,6 +225,7 @@ class Cameras:
         async with asyncio.TaskGroup() as tasks:
             for camera in self._cameras:
                 tasks.create_task(camera.run(), name=f"camera-{camera.address}")
+                tasks.create_task(camera.monitor(), name=f"camera-health-{camera.address}")
 
     async def capture(self, name: str) -> Snapshot:
         if not self.configured:
