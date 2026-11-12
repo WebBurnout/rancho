@@ -1,11 +1,18 @@
 # Camera names appear in Telegram messages and alerts. Photos arrive in this order.
 # Credentials stay in .env (CAMERA_USERNAME / CAMERA_PASSWORD).
+#
+# `alerts` is what a camera sends to Telegram: person (default), vehicle, animal.
+# All alert only while armed. Persons get a photo and the siren; vehicles and
+# animals get a photo (at most every 5 min) and never the siren.
+
 cameras:
   - name: Patio
-    host: 10.10.0.10
-  - name: Puerta
     host: 10.10.0.11
   - name: Bomba
+    host: 10.10.0.10
+    # Something has been leaving droppings by the pump.
+    alerts: [person, animal]
+  - name: Puerta
     host: 10.10.0.12
   - name: Cocina
     host: 10.10.0.13

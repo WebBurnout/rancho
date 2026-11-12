@@ -7,6 +7,12 @@ import signal
 from rancho.core.cameras import Cameras
 from rancho.core.config import Config
 from rancho.core.events import EventBus
+from rancho.core.hardware import GpioPowerSensor, GpioSiren
+from rancho.core.photos import PhotoArchive
+from rancho.core.power import PowerMonitor
+from rancho.core.recorder import Recorder
+from rancho.core.siren import SirenControl
+from rancho.core.starlink import StarlinkMonitor
 from rancho.core.state import Alarm
 from rancho.frontends.telegram import TelegramFrontend
 
@@ -20,14 +26,27 @@ async def run(config: Config) -> None:
         loop.add_signal_handler(sig, stop.set)
 
     events = EventBus()
+    # Claim the siren first, so it is driven OFF as early as possible.
+    siren = SirenControl(events, GpioSiren(config.siren_active_low))
+    siren.open()
+    power = PowerMonitor(events, GpioPowerSensor())
+    power.open()
+    starlink = StarlinkMonitor(events, power)
     alarm = Alarm(config.state_file, events)
     alarm.load()
-    cameras = Cameras(config, events)
-    telegram = TelegramFrontend(config, events, cameras, alarm)
+    archive = PhotoArchive(config.state_file.parent / "photos")
+    archive.load()
+    cameras = Cameras(config, events, archive)
+    recorder = Recorder(events, cameras, alarm)
+    telegram = TelegramFrontend(config, events, cameras, alarm, siren, power, starlink)
     workers = {
+        asyncio.create_task(siren.run(), name="siren"),
+        asyncio.create_task(power.run(), name="power"),
+        asyncio.create_task(starlink.run(), name="starlink"),
         asyncio.create_task(alarm.run(), name="alarm"),
         asyncio.create_task(telegram.run(), name="telegram"),
         asyncio.create_task(cameras.run(), name="cameras"),
+        asyncio.create_task(recorder.run(), name="recorder"),
     }
     stop_task = asyncio.create_task(stop.wait(), name="shutdown")
     try:

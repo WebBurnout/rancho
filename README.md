@@ -28,7 +28,13 @@ comma-separated integers; everyone in an allowed group can use the bot.
 Send `/ayuda` (or `/start`) in the group to list the commands. If Telegram
 routes a command to another bot, use `/ayuda@YourBotUsername`.
 Other chats are silently ignored. The bot uses outbound long polling and retries
-network failures. Only one process may poll this bot token; any homelab monitor
+network failures. Alerts (power, intrusions, cameras, mode changes) retry for up
+to 15 min, so they get through a Starlink-to-Telcel failover or a Starlink reboot
+after a power cut. Each attempt is cut off after 20 s (2 min for photos),
+because a connection left on the dead uplink can hang with no error. Photo
+uploads run in the background, so a slow upload never delays the next alert.
+Every sent alert is logged (`Telegram sent power_lost`), along with each
+failed attempt. Only one process may poll this bot token; any homelab monitor
 using it must send messages only.
 
 ## Alarm
@@ -50,8 +56,16 @@ person's Telegram name (“Alarma armada (Tim)”, “Alarma desarmada (Tim)”,
 “Alertas en pausa hasta 15:30 (Tim)”).
 
 While armed, a person detected by a camera sends “Persona detectada: <camera>”
-with that camera's photo. Each camera alerts at most once a minute. Nothing is
-sent while disarmed or while alerts are paused with `/pausa`. Arming ends the
+with that camera's photo and sounds the siren for 5 s. Each camera sends at most
+one photo a minute, and the siren sounds at most once a minute. Nothing is sent
+or sounded while disarmed or while alerts are paused with `/pausa`.
+
+From 19:00 to 07:00 (IR mode, when false positives happen), the first detection
+still sends its photo, captioned that the siren is waiting. The siren only
+sounds if a second person detection, on any camera, follows within 2 min; that
+detection also sends a photo, even within the camera's cooldown. Disarming
+silences the siren. The siren timings and night window are constants in
+`rancho/core/state.py`; equal start and end hours disable the night rule. Arming ends the
 pause. It is kept in memory only, so a restart also resumes alerts. Cooldown and the maximum pause are
 constants in `rancho/core/state.py`.
 
@@ -105,19 +119,20 @@ fails initialization, verify with an admin account.
 4. Send `/foto` (or `/foto@YourBotUsername`) in the group. Expect one photo per camera, or
    an error identifying any camera that could not provide one.
 
-Keep camera access on the trusted LAN, keep their internet access blocked, and
-do not forward camera ports. Baichuan traffic is only weakly encrypted; treat
-camera credentials and session tokens as secrets. Library debug output is suppressed, and our camera
-adapter logs camera names, addresses, and error types rather than raw responses. Photos stay in
-memory and go to Telegram over HTTPS.
+Keep camera access on the trusted LAN and do not forward camera ports. Baichuan
+traffic is only weakly encrypted; treat camera credentials and session tokens as
+secrets. Library debug output is suppressed, and our camera adapter logs camera
+names, addresses, and error types rather than raw responses. Photos go to
+Telegram over HTTPS and are archived on the Pi (see [Photo archive](#photo-archive)).
 
 ### Person detection
 
 The service subscribes to native Baichuan TCP events on port 9000. The library
 maintains the connection and updates cached AI state; callbacks read that cache
 and publish core `PersonDetected` events on transitions to person detected.
-Detections only alert while armed (see [Alarm](#alarm)); every detection is
-logged. Walk in front of each camera while watching:
+Detections only alert, and are only logged, while armed (see [Alarm](#alarm));
+while disarmed nothing about them is logged. To test, arm, then walk in front
+of each camera while watching:
 
 ```sh
 uv run --frozen --no-sync task logs
@@ -127,17 +142,93 @@ Expect lines such as:
 
 ```text
 Camera Bomba (10.10.0.10): connected; snapshots ready
-Camera Bomba (10.10.0.10): native push subscription requested on port 9000
+Camera Bomba (10.10.0.10): native push subscription requested on port 9000 (person, animal)
 Camera Bomba (10.10.0.10): native push received
-Camera Bomba (10.10.0.10): person detected
-Camera Bomba (10.10.0.10): person cleared
+Intrusion: person on Bomba while armed
+Camera Bomba: recording a photo every 1s
+Camera Bomba: recording stopped after 8 photos
 ```
 
 A subscription request alone does not confirm firmware/account support: verify
 that walking in view produces a person event on **each** camera. Generic motion
 and repeated person-positive updates do not produce additional person events.
 After a disconnect, detection state is unknown; a new positive event may emit
-again. There is no periodic AI-state polling or siren trigger yet.
+again. There is no periodic AI-state polling.
+
+## Siren and power sensing
+
+Both use the GPIO character device through `gpiod` (the service gets the
+`gpio` group).
+
+- **Siren:** MOSFET on GPIO25, active-high by default; set
+  `SIREN_ACTIVE_LOW=true` in `.env` if your driver turns on with a low pin. The
+  line is claimed as an output driven OFF at start, and switched OFF and
+  released at stop. If the siren can't be opened, alerts still go out and
+  `/estado` and the restart message say “Sirena no disponible”. This kernel keeps outputs driven after the
+  process dies (`persist_gpio_outputs=Y`), so the unit's `ExecStopPost` runs
+  `python -m rancho.siren_off` after every stop, including crashes. During boot
+  the pin is an input with the default pull-down, so the gate needs its own
+  pull-down resistor to stay off before the service runs.
+- **Power:** the 120VAC relay contact on GPIO23 (external 220 Ω pull-up, 1 kΩ in
+  series; contact closed = 0 = mains present). It is polled every second and a
+  change counts after 3 equal reads (about 3 s). Every outage sends “Corte de
+  luz desde las HH:MM” right away, then the cameras' photos as a separate album,
+  including mains already off when the service starts. When mains returns: “Volvió la luz (sin
+  luz N min)”. Power cuts never sound the siren, and they alert whether or not
+  the alarm is armed. `/estado` shows the mains state.
+
+## Starlink dish
+
+The dish is on the roof, so its cable could be cut. Every 15 s Rancho opens a TCP
+connection to the dish's management port (`192.168.100.1:9200`, reached through
+the Starlink router). This is local, so satellite dropouts don't count, and
+unlike ping it needs no extra privileges. If the dish stays unreachable for 60 s
+while mains is present, “Antena Starlink sin conexión desde las HH:MM, con luz.
+Revisa el cable de la antena.” goes out (over the SIM backup), and
+“Antena Starlink conectada de nuevo” with the duration when it answers again.
+The dish is not on the UPS: during a power cut, and for 5 min after mains
+returns while it boots, it is not reported. A dish still down after that does
+alert, which catches a cable cut during a power cut. If the power sensor is
+unavailable, mains counts as present. `/estado` shows the dish state. Timings
+and the address are constants in `rancho/core/starlink.py`.
+
+### Camera settings
+
+Camera settings (ports, detection sensitivity, push notifications) are set in
+the Reolink app. reolink-aio's Baichuan port commands don't work on this
+firmware: writes are ignored or reset other ports, and reads don't match what
+the camera actually has open. Turn off HTTP, HTTPS, RTSP, RTMP, and ONVIF on
+each camera and leave port 9000 on.
+
+### Photo archive
+
+Every snapshot (alerts, power cuts, `/foto`) is saved at full camera resolution
+(2560×1920 on the RLC-520A, ~0.8 MB) to `photos/YYYY-MM-DD_HHMMSS.mmm-Camera.jpg`
+in the checkout, all in one folder (gitignored), for identifying people later.
+When the folder passes 100 GB, the oldest photos are deleted (`MAX_BYTES` in
+`rancho/core/photos.py`). Telegram gets a copy downscaled to 1280 px
+(~150–250 KB), the largest size Telegram keeps for ordinary photos, which saves
+SIM data. Copy files off the Pi with `scp 'rancho:rancho/photos/2026-11-11_*' .`.
+
+While armed (and not paused), a camera that detects a person is photographed
+every second until it clears, the alarm is disarmed or paused, or the camera
+disconnects. Every 10 s one of those photos goes to Telegram as “<camera>:
+persona aún detectada (N s)”, after the first “Persona detectada” alert. At most
+30 follow-ups (5 min) are sent per detection, so a stuck detection can't flood
+the chat or the SIM; archiving continues. Timings are constants in
+`rancho/core/recorder.py`.
+
+### Animal and vehicle alerts
+
+Each camera in `cameras.yaml` can list `alerts`: `person` (the default),
+`vehicle`, `animal`. Persons follow the alarm (photo and siren while armed).
+Vehicles and animals send one photo (“Animal detectado: Bomba”) only while
+armed, at most every 5 min per camera and type
+(`SIGHTING_COOLDOWN` in `rancho/core/state.py`), never sound the siren, and are
+silenced by `/pausa`. The photo is archived at full resolution like the others.
+A type the camera's firmware doesn't support is logged at connect (“animal
+detection not advertised”). The cameras always detect every type they support;
+the Reolink app only sets sensitivity.
 
 ### Offline alerts
 
@@ -168,7 +259,9 @@ uv run --frozen --no-sync task test
 
 These tests replace the Reolink clients and Telegram sending, and exercise
 snapshots, push transitions, cleanup, partial failures, the chat allow-list,
-send retries, alarm modes, alert sleep, cooldown, state persistence, and the sentinel's down/up alerts with faked ping. They do not open camera connections.
+send retries, alarm modes, alert sleep, cooldown, night siren confirmation, the
+siren timer, power-cut debouncing, state persistence, and the sentinel's down/up
+alerts with faked ping. They do not open camera connections or GPIO lines.
 
 ## Deploy an update
 
@@ -193,5 +286,4 @@ sudo systemctl daemon-reload
 
 The symlink points directly at the tracked unit, so no copying is needed. `.env`,
 state, and the venv stay local and are not tracked. Never delete the checkout as
-part of a deploy. GPIO permissions, relay polarity, and physical boot/crash safety
-remain for the hardware implementation step.
+part of a deploy.

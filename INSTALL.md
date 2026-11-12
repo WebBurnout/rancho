@@ -54,7 +54,7 @@ disabled.
 Relative state paths are resolved against the directory containing `.env`; the
 default is `state.json` in the checkout.
 
-Expect uv to create `.venv` and install `python-dotenv`, `python-telegram-bot`,
+Expect uv to create `.venv` and install `gpiod`, `pillow`, `python-dotenv`, `python-telegram-bot`,
 `reolink-aio`, Taskipy, and dependencies from `uv.lock`. Taskipy is in the default
 `dev` group. Run uv as `tim`.
 
@@ -97,6 +97,62 @@ Expect `active`, shutdown messages (`Rancho stopping`, `Telegram stopped`,
 
 Send `/ayuda` in an allowed group and expect the command list. See [README.md](README.md) for camera setup, `/foto`, and update/restart
 commands.
+
+## 7. Z-Wave board (Zooz ZAC93)
+
+The ZAC93 sits on header pins 1–10 and talks over the UART on GPIO14 (TX,
+pin 8) and GPIO15 (RX, pin 10) at 115200 baud. By default the Pi 4 gives its
+good UART (PL011) to Bluetooth and puts a login console on the serial port, so
+both have to move.
+
+Shut down (`sudo poweroff`), unplug power, and seat the board on pins 1–10,
+oriented as Zooz's sheet shows. Boot, then:
+
+1. In `/boot/firmware/config.txt`, add these lines at the end, under the final
+   `[all]` section:
+
+   ```text
+   enable_uart=1
+   dtoverlay=disable-bt
+   ```
+
+2. In `/boot/firmware/cmdline.txt`, remove `console=serial0,115200 `. The file
+   must stay a single line.
+
+3. Disable the Bluetooth UART service and reboot:
+
+   ```sh
+   sudo systemctl disable hciuart
+   sudo reboot
+   ```
+
+After the reboot:
+
+```sh
+tail -3 /boot/firmware/config.txt
+cat /boot/firmware/cmdline.txt
+ls -l /dev/serial0
+systemctl is-active serial-getty@ttyAMA0.service
+```
+
+Expect the two new lines, no `console=serial0` in the command line,
+`/dev/serial0 -> ttyAMA0`, and `inactive`.
+
+Check that the board answers. This sends the Serial API `GET_VERSION` request
+and prints the reply as hex:
+
+```sh
+stty -F /dev/serial0 115200 raw -echo
+(timeout 2 cat /dev/serial0 | xxd) &
+sleep 0.3
+printf '\x01\x03\x00\x15\xe9' > /dev/serial0
+wait
+```
+
+Expect `06` (ACK) followed by a frame starting `01 .. 01 15` that contains the
+text `Z-Wave` and a version number. No output means the board isn't answering.
+Check that it is seated, that `/dev/serial0` points at `ttyAMA0` (not
+`ttyS0`), and that nothing else has the port open (`sudo fuser /dev/serial0`).
 
 ## Homelab sentinel
 

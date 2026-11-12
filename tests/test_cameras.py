@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from rancho.core.cameras import OFFLINE_AFTER, Cameras, Snapshot, _Camera
 from rancho.core.config import CameraConfig, Config
-from rancho.core.events import CameraOffline, CameraOnline, EventBus, PersonDetected
+from rancho.core.events import (
+    CameraOffline, CameraOnline, EventBus, ObjectDetected, PersonCleared, PersonDetected,
+)
 
 JPEG = b"\xff\xd8\xfftest-image"
 BOMBA = CameraConfig(name="Bomba", host="10.10.0.10")
@@ -83,16 +85,15 @@ class CameraTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.error, "aún no conectada")
         self.client.get_snapshot.assert_not_awaited()
 
-    async def test_only_person_rising_edges_publish(self) -> None:
+    async def test_only_person_transitions_publish(self) -> None:
         queue = self.bus.subscribe()
         self.client.ai_detected.side_effect = [False, True, True, False, True]
         for _ in range(5):
             self.camera._on_push()
-        self.assertEqual(queue.qsize(), 2)
-        event = queue.get_nowait()
-        self.assertIsInstance(event, PersonDetected)
-        self.assertEqual(event.camera, "Bomba")
-        self.assertEqual(event.name, "person_detected")
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual([type(e) for e in events], [PersonDetected, PersonCleared, PersonDetected])
+        self.assertEqual(events[0].camera, "Bomba")
+        self.assertEqual(events[0].name, "person_detected")
         self.client.ai_detected.assert_called_with(0, "person")
 
     async def test_true_first_push_is_not_lost(self) -> None:
@@ -100,6 +101,26 @@ class CameraTests(IsolatedAsyncioTestCase):
         self.client.ai_detected.return_value = True
         self.camera._on_push()
         self.assertEqual(queue.qsize(), 1)
+
+    async def test_animal_alerts_only_where_configured(self) -> None:
+        queue = self.bus.subscribe()
+        self.client.ai_detected.side_effect = lambda channel, kind: kind == "pet"
+        self.camera._on_push()
+        self.assertTrue(queue.empty())
+        camera = _Camera(CameraConfig("Bomba", "10.10.0.10", alerts=("person", "animal")), config(), self.bus)
+        camera._client, camera._ready = self.client, True
+        camera._on_push()
+        camera._on_push()
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual(events, [ObjectDetected(camera="Bomba", kind="animal", occurred_at=events[0].occurred_at)])
+
+    async def test_disconnect_while_detected_clears_person(self) -> None:
+        queue = self.bus.subscribe()
+        self.client.ai_detected.return_value = True
+        self.camera._on_push()
+        await self.camera._close()
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+        self.assertEqual([type(e) for e in events], [PersonDetected, PersonCleared])
 
     async def test_late_callback_after_close_is_ignored(self) -> None:
         queue = self.bus.subscribe()

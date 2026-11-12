@@ -1,5 +1,6 @@
 """Offline tests: no real token, polling, network, or hardware access."""
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,7 +12,10 @@ from telegram.error import BadRequest, NetworkError
 
 from rancho.core.cameras import Snapshot
 from rancho.core.config import Config
-from rancho.core.events import CameraOffline, CameraOnline, EventBus, Intrusion, ModeChanged
+from rancho.core.events import (
+    CameraOffline, CameraOnline, EventBus, Intrusion, ModeChanged, PersonPhoto, PowerLost, PowerRestored,
+    Sighting, StarlinkOffline, StarlinkOnline,
+)
 from rancho.core.state import Alarm, AlarmMode
 from rancho.frontends.telegram import HELP_TEXT, TelegramFrontend
 
@@ -118,17 +122,41 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         self.frontend = TelegramFrontend(config, EventBus(), self.cameras)
         self.bot = SimpleNamespace(send_photo=AsyncMock(), send_message=AsyncMock())
 
+    async def handle(self, event) -> None:
+        await self.frontend._handle_event(self.bot, event)
+        await asyncio.gather(*self.frontend._uploads)
+
     async def test_sends_photo_from_detecting_camera(self) -> None:
         self.cameras.capture.return_value = Snapshot("Patio", image=b"jpeg")
-        await self.frontend._handle_event(self.bot, Intrusion(camera="Patio"))
+        await self.handle(Intrusion(camera="Patio"))
         self.cameras.capture.assert_awaited_once_with("Patio")
         args, kwargs = self.bot.send_photo.call_args
         self.assertEqual(args, (-123, b"jpeg"))
         self.assertEqual(kwargs["caption"], "Persona detectada: Patio")
 
+    async def test_caption_says_whether_siren_sounded(self) -> None:
+        self.cameras.capture.return_value = Snapshot("Patio", image=b"jpeg")
+        await self.handle(Intrusion(camera="Patio", siren=True))
+        self.assertEqual(self.bot.send_photo.call_args.kwargs["caption"], "Persona detectada: Patio\nSirena activada")
+        await self.handle(Intrusion(camera="Patio", unconfirmed=True))
+        self.assertIn("De noche la sirena", self.bot.send_photo.call_args.kwargs["caption"])
+
+    async def test_animal_sighting_sends_photo(self) -> None:
+        self.cameras.capture.return_value = Snapshot("Bomba", image=b"jpeg")
+        await self.handle(Sighting(camera="Bomba", kind="animal"))
+        self.cameras.capture.assert_awaited_once_with("Bomba")
+        self.assertEqual(self.bot.send_photo.call_args.kwargs["caption"], "Animal detectado: Bomba")
+
+    async def test_follow_up_photo_is_sent_with_elapsed_time(self) -> None:
+        await self.handle(PersonPhoto(camera="Patio", image=b"jpeg", seconds=20))
+        args, kwargs = self.bot.send_photo.call_args
+        self.assertEqual(args, (-123, b"jpeg"))
+        self.assertEqual(kwargs["caption"], "Patio: persona aún detectada (20 s)")
+        self.cameras.capture.assert_not_awaited()
+
     async def test_failed_snapshot_still_alerts(self) -> None:
         self.cameras.capture.return_value = Snapshot("Patio", error="aún no conectada")
-        await self.frontend._handle_event(self.bot, Intrusion(camera="Patio"))
+        await self.handle(Intrusion(camera="Patio"))
         self.bot.send_photo.assert_not_awaited()
         text = self.bot.send_message.call_args.args[1]
         self.assertIn("Persona detectada: Patio", text)
@@ -138,12 +166,12 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         self.cameras.capture.return_value = Snapshot("Patio", image=b"jpeg")
         self.bot.send_photo.side_effect = [NetworkError("offline")] * 4 + [None]
         with patch("rancho.frontends.telegram.asyncio.sleep", new_callable=AsyncMock):
-            await self.frontend._handle_event(self.bot, Intrusion(camera="Patio"))
+            await self.handle(Intrusion(camera="Patio"))
         self.assertEqual(self.bot.send_photo.await_count, 5)
 
     async def test_failed_alert_does_not_raise(self) -> None:
         self.cameras.capture.side_effect = RuntimeError("boom")
-        await self.frontend._handle_event(self.bot, Intrusion(camera="Patio"))
+        await self.handle(Intrusion(camera="Patio"))
         self.bot.send_message.assert_not_awaited()
 
     async def test_camera_offline_is_broadcast(self) -> None:
@@ -156,6 +184,72 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         await self.frontend._handle_event(self.bot, CameraOnline(camera="Cocina", down_seconds=3900))
         self.assertEqual(self.bot.send_message.call_args.args,
                          (-123, "Cámara reconectada: Cocina (sin conexión 1 h 5 min)"))
+
+
+class PowerAlertTests(IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        config = Config(
+            state_file=Path("state.json"),
+            telegram_bot_token="test-token", telegram_allowed_chat_ids=frozenset({-123}),
+        )
+        self.cameras = Mock(configured=True, capture_all=AsyncMock())
+        self.frontend = TelegramFrontend(config, EventBus(), self.cameras)
+        self.bot = SimpleNamespace(send_media_group=AsyncMock(), send_message=AsyncMock())
+        self.since = datetime(2026, 11, 10, 21, 5)
+
+    async def test_power_cut_sends_text_before_taking_photos(self) -> None:
+        self.cameras.capture_all.return_value = [
+            Snapshot("Patio", image=b"one"), Snapshot("Bomba", error="offline"), Snapshot("Puerta", image=b"two"),
+        ]
+        await self.frontend._handle_event(self.bot, PowerLost(since=self.since))
+        self.assertEqual(self.bot.send_message.call_args.args, (-123, "Corte de luz desde las 21:05"))
+        self.cameras.capture_all.assert_not_awaited()
+        await asyncio.gather(*self.frontend._uploads)
+        args, kwargs = self.bot.send_media_group.call_args
+        self.assertEqual(args[0], -123)
+        self.assertEqual(len(args[1]), 2)
+        self.assertEqual(kwargs["caption"], "Fotos del corte de luz de las 21:05")
+
+    async def test_power_cut_without_cameras_sends_only_text(self) -> None:
+        self.cameras.configured = False
+        await self.frontend._handle_event(self.bot, PowerLost(since=self.since))
+        await asyncio.gather(*self.frontend._uploads)
+        self.assertEqual(self.bot.send_message.call_args.args, (-123, "Corte de luz desde las 21:05"))
+        self.bot.send_media_group.assert_not_awaited()
+
+    async def test_hung_send_is_cut_off_and_retried(self) -> None:
+        calls = []
+
+        async def send_message(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                await asyncio.Event().wait()
+        self.bot.send_message = send_message
+        with patch("rancho.frontends.telegram.TEXT_ATTEMPT_TIMEOUT", 0.01), \
+                patch("rancho.frontends.telegram.asyncio.sleep", new_callable=AsyncMock):
+            await self.frontend._handle_event(self.bot, PowerLost(since=self.since))
+        self.assertEqual(len(calls), 2)
+
+    async def test_alert_gives_up_at_deadline(self) -> None:
+        self.cameras.configured = False
+        self.bot.send_message.side_effect = NetworkError("offline")
+        with patch("rancho.frontends.telegram.ALERT_DEADLINE", 0), \
+                self.assertLogs("rancho.frontends.telegram", "WARNING") as logs:
+            await self.frontend._handle_event(self.bot, PowerLost(since=self.since))
+        self.assertEqual(self.bot.send_message.await_count, 1)
+        self.assertIn("Alert for power_lost failed (NetworkError)", logs.output[-1])
+
+    async def test_starlink_alerts(self) -> None:
+        await self.frontend._handle_event(self.bot, StarlinkOffline(since=self.since))
+        self.assertTrue(self.bot.send_message.call_args.args[1].startswith(
+            "Antena Starlink sin conexión desde las 21:05"))
+        await self.frontend._handle_event(self.bot, StarlinkOnline(down_seconds=600))
+        self.assertEqual(self.bot.send_message.call_args.args,
+                         (-123, "Antena Starlink conectada de nuevo (sin conexión 10 min)"))
+
+    async def test_power_restored_reports_duration(self) -> None:
+        await self.frontend._handle_event(self.bot, PowerRestored(down_seconds=600))
+        self.assertEqual(self.bot.send_message.call_args.args, (-123, "Volvió la luz (sin luz 10 min)"))
 
 
 class AlarmCommandTests(IsolatedAsyncioTestCase):
@@ -212,6 +306,18 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
         text = self.message.reply_text.call_args.args[0]
         self.assertTrue(text.startswith("Alarma armada desde "))
         self.assertTrue(text.endswith("(Horacio)"))
+
+    async def test_status_shows_power_and_missing_siren(self) -> None:
+        self.frontend._power = SimpleNamespace(available=True, present=False, off_at=datetime(2026, 11, 10, 21, 5))
+        self.frontend._siren = SimpleNamespace(available=False)
+        text = self.frontend._status_text()
+        self.assertIn("\nSin luz desde las 21:05", text)
+        self.assertIn("\nSirena no disponible", text)
+        self.frontend._power = SimpleNamespace(available=True, present=True, off_at=None)
+        self.frontend._siren = SimpleNamespace(available=True)
+        self.assertTrue(self.frontend._status_text().endswith("\nLuz: normal"))
+        self.frontend._starlink = SimpleNamespace(online=False)
+        self.assertTrue(self.frontend._status_text().endswith("\nAntena Starlink: sin conexión"))
 
     async def test_sleep_broadcasts_and_shows_in_status(self) -> None:
         await self.frontend._pause(self.update(), self.context("1"))

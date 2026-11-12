@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Asyncio alarm service for Rancho"
 requires-python = ">=3.11"
 dependencies = [
+    "gpiod>=2.2,<3",
+    "pillow>=11,<14",
     "python-dotenv>=1.0,<2",
     "python-telegram-bot>=22,<23",
     "pyyaml>=6,<7",

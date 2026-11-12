@@ -9,8 +9,11 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from rancho.core.config import CameraConfig, Config
-from rancho.core.events import CameraOffline, CameraOnline, EventBus, PersonDetected
+from rancho.core.config import DETECTION_TYPES, CameraConfig, Config
+from rancho.core.events import (
+    CameraOffline, CameraOnline, EventBus, ObjectDetected, PersonCleared, PersonDetected,
+)
+from rancho.core.photos import PhotoArchive
 
 if TYPE_CHECKING:
     from reolink_aio.api import Host
@@ -59,7 +62,11 @@ class _Camera:
         self._client: Host | None = None
         self._lock = asyncio.Lock()
         self._ready = False
+        self._alerts = camera.alerts
         self._person: bool | None = None
+        # Last state of each other alert type (vehicle, animal); None means unknown.
+        self._objects: dict[str, bool | None] = {}
+        self._subscribed = False
         self._push_confirmed = False
         # Monotonic time the current outage started; None while online.
         self._down_since: float | None = None
@@ -73,13 +80,29 @@ class _Camera:
         if not self._push_confirmed:
             self._push_confirmed = True
             logger.info("Camera %s: native push received", self.label)
-        detected = client.ai_detected(0, "person")
-        if detected and self._person is not True:
-            logger.info("Camera %s: person detected", self.label)
-            self._events.publish(PersonDetected(camera=self.name))
-        elif not detected and self._person is True:
-            logger.info("Camera %s: person cleared", self.label)
-        self._person = detected
+        # Detections are logged by the alarm, and only while armed.
+        for kind in self._alerts:
+            detected = client.ai_detected(0, DETECTION_TYPES[kind])
+            if kind == "person":
+                if detected and self._person is not True:
+                    logger.debug("Camera %s: person detected", self.label)
+                    self._events.publish(PersonDetected(camera=self.name))
+                elif not detected and self._person is True:
+                    logger.debug("Camera %s: person cleared", self.label)
+                    self._events.publish(PersonCleared(camera=self.name))
+                self._person = detected
+                continue
+            if detected and self._objects.get(kind) is not True:
+                logger.debug("Camera %s: %s detected", self.label, kind)
+                self._events.publish(ObjectDetected(camera=self.name, kind=kind))
+            self._objects[kind] = detected
+
+    def _forget_person(self) -> None:
+        # Unknown is not 'no person', but recording must stop with the connection.
+        if self._person is True:
+            self._events.publish(PersonCleared(camera=self.name))
+        self._person = None
+        self._objects.clear()
 
     async def run(self) -> None:
         while True:
@@ -90,24 +113,28 @@ class _Camera:
                         await self._client.get_host_data()
                     self._ready = True
                 logger.info("Camera %s: connected; snapshots ready", self.label)
-                if self._client.ai_supported(0, "person"):
+                supported = [k for k in self._alerts if self._client.ai_supported(0, DETECTION_TYPES[k])]
+                for kind in self._alerts:
+                    if kind not in supported:
+                        logger.warning("Camera %s: %s detection not advertised by firmware/account", self.label, kind)
+                self._subscribed = bool(supported)
+                if self._subscribed:
                     self._client.baichuan.register_callback(
                         CALLBACK_ID, self._on_push, cmd_id=33, channel=0
                     )
                     await self._client.baichuan.subscribe_events()
-                    logger.info("Camera %s: native push subscription requested on port 9000", self.label)
-                else:
-                    logger.warning("Camera %s: person detection not advertised by firmware/account", self.label)
+                    logger.info("Camera %s: native push subscription requested on port 9000 (%s)",
+                                self.label, ", ".join(supported))
                 while True:
                     await asyncio.sleep(30)
-                    if self._client.ai_supported(0, "person"):
+                    if self._subscribed:
                         # The library maintains/reconnects the TCP subscription.
                         # This watchdog checks it, not the camera's AI state.
                         await self._client.baichuan.check_subscribe_events()
                         if not self._client.baichuan.session_active:
                             # Disconnected means unknown, not 'no person'. A true
                             # state after reconnect may legitimately emit again.
-                            self._person = None
+                            self._forget_person()
                             self._push_confirmed = False
             except asyncio.CancelledError:
                 raise
@@ -161,7 +188,7 @@ class _Camera:
         async with self._lock:
             self._ready = False
             client, self._client = self._client, None
-            self._person = None
+            self._forget_person()
             self._push_confirmed = False
             if client is None:
                 return
@@ -202,9 +229,10 @@ class _Camera:
 
 
 class Cameras:
-    def __init__(self, config: Config, events: EventBus) -> None:
+    def __init__(self, config: Config, events: EventBus, archive: PhotoArchive | None = None) -> None:
         self._config = config
         self._cameras = [_Camera(camera, config, events) for camera in config.cameras]
+        self._archive = archive
 
     @property
     def configured(self) -> bool:
@@ -232,10 +260,17 @@ class Cameras:
             raise ValueError("Cameras need cameras.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
         for camera in self._cameras:
             if camera.name == name:
-                return await camera.snapshot()
+                return await self._keep(await camera.snapshot())
         raise KeyError(name)
 
     async def capture_all(self) -> list[Snapshot]:
         if not self.configured:
             raise ValueError("Cameras need cameras.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
-        return list(await asyncio.gather(*(camera.snapshot() for camera in self._cameras)))
+        snapshots = await asyncio.gather(*(camera.snapshot() for camera in self._cameras))
+        return list(await asyncio.gather(*(self._keep(snapshot) for snapshot in snapshots)))
+
+    async def _keep(self, snapshot: Snapshot) -> Snapshot:
+        # Every full-resolution photo is archived before any front end downscales it.
+        if self._archive is not None and snapshot.image is not None:
+            await self._archive.save(snapshot.camera, snapshot.image)
+        return snapshot

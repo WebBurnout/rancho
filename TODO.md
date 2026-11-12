@@ -1,45 +1,35 @@
 
 
 
+patio alerts for animals
 
-
-
-
-check that it alerts when a camera goes offline
-
-can sense power cut
-
-alerts on power outage with pics
-
-can turn on siren
-
-can sense mains cut and ignores power cut in that case
-
-mount on plywood
+can set settings
 
 
 
 
 
+connect the indoor camera
+put the memory card in the indoor camera
+apply camera config so the indoor one works
+
+
+
+
+test failover to hologram sim after power cut
+
+
+
+
+
+test satelite disconnect
 
 
 
 
 
 
-test squids ping message
-
-test failover to hologram sim
-
-
-
-invite Horacio to the chat
-
-
-
-alert when wifi drops
-
-
+/estado should list cameras and show which is online
 
 z-wave board works
 
@@ -50,5 +40,7 @@ window sensors: kitchen window, living room window, window with the cable coming
 
 
 
-will arm when i leave and disarm when i arrive automatically using traccar
+invite Horacio to the chat
+
+
 

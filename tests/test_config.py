@@ -33,6 +33,18 @@ class CamerasYamlTests(TestCase):
             CameraConfig("Bomba", "10.10.0.10"), CameraConfig("Entrada", "10.10.0.11"),
         ))
 
+    def test_alerts_default_to_person(self) -> None:
+        cameras = self.load(
+            "cameras:\n  - name: Patio\n    host: 10.10.0.10\n"
+            "  - name: Bomba\n    host: 10.10.0.11\n    alerts: [person, animal]\n"
+        )
+        self.assertEqual([c.alerts for c in cameras], [("person",), ("person", "animal")])
+
+    def test_bad_alerts_are_rejected(self) -> None:
+        for alerts in ("animal", "[cat]", "[person, person]"):
+            with self.subTest(alerts), self.assertRaises(ValueError):
+                self.load(f"cameras:\n  - name: Bomba\n    host: 10.10.0.11\n    alerts: {alerts}\n")
+
     def test_missing_file_means_no_cameras(self) -> None:
         self.assertEqual(load_cameras(self.path), ())
 
@@ -62,3 +74,26 @@ class CamerasYamlTests(TestCase):
         for label, text in cases.items():
             with self.subTest(label), self.assertRaises(ValueError):
                 self.load(text)
+
+
+class EnvTests(TestCase):
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.env = Path(self.tmp.name) / ".env"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_hardware_defaults(self) -> None:
+        self.env.write_text("", encoding="utf-8")
+        config = load_config(self.env)
+        self.assertFalse(config.siren_active_low)
+
+    def test_hardware_settings(self) -> None:
+        self.env.write_text("SIREN_ACTIVE_LOW=true\n", encoding="utf-8")
+        self.assertTrue(load_config(self.env).siren_active_low)
+
+    def test_bad_hardware_settings_are_rejected(self) -> None:
+        self.env.write_text("SIREN_ACTIVE_LOW=maybe\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_config(self.env)

@@ -2,17 +2,24 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from collections.abc import Awaitable, Callable, Coroutine
+from io import BytesIO
+from typing import Any, TypeVar
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message, Update
 from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from rancho.core.cameras import Cameras
 from rancho.core.config import Config
-from rancho.core.events import CameraOffline, CameraOnline, Event, EventBus, Intrusion, ModeChanged
-from rancho.core.state import MAX_SLEEP_HOURS, Alarm, AlarmMode
+from rancho.core.events import (
+    CameraOffline, CameraOnline, Event, EventBus, Intrusion, ModeChanged, PersonPhoto, PowerLost, PowerRestored,
+    Sighting, StarlinkOffline, StarlinkOnline,
+)
+from rancho.core.power import PowerMonitor
+from rancho.core.siren import SirenControl
+from rancho.core.starlink import StarlinkMonitor
+from rancho.core.state import CONFIRM_WINDOW, MAX_SLEEP_HOURS, Alarm, AlarmMode
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -35,10 +42,18 @@ KEYBOARD = InlineKeyboardMarkup([
 ])
 # Set to KEYBOARD to attach the buttons to every message again.
 REPLY_MARKUP: InlineKeyboardMarkup | None = None
+SIGHTING_TEXT = {"animal": "Animal detectado", "vehicle": "Vehículo detectado"}
+# Telegram stores ordinary photos at most 1280 px on the long side, so anything
+# bigger only costs SIM data. Full resolution stays in photos/ on the Pi.
+TELEGRAM_MAX_SIDE = 1280
 # Uploads can be slow on Telcel; keep these generous.
 PHOTO_TIMEOUTS = {"connect_timeout": 10, "write_timeout": 60, "read_timeout": 30}
-# Alerts retry for ~30s in total so they survive a Starlink/Telcel failover.
-ALERT_ATTEMPTS = 6
+# Alerts keep retrying through an uplink failover, including a Starlink reboot
+# after a power cut (Starlink is not on the UPS). A connection opened on the dead
+# uplink can hang with no error, so each attempt also has a hard time limit.
+ALERT_DEADLINE = 900
+TEXT_ATTEMPT_TIMEOUT = 20
+PHOTO_ATTEMPT_TIMEOUT = 120
 
 
 async def _send_with_retry(send: Callable[[], Awaitable[T]], attempts: int = 3) -> T:
@@ -56,6 +71,58 @@ async def _send_with_retry(send: Callable[[], Awaitable[T]], attempts: int = 3) 
     raise AssertionError("unreachable")
 
 
+async def _send_alert(
+    send: Callable[[], Awaitable[T]], what: str, attempt_timeout: float | None = None,
+) -> T:
+    attempt_timeout = attempt_timeout or TEXT_ATTEMPT_TIMEOUT
+    loop = asyncio.get_running_loop()
+    give_up = loop.time() + ALERT_DEADLINE
+    delay = 1
+    attempt = 1
+    while True:
+        try:
+            async with asyncio.timeout(attempt_timeout):
+                result = await send()
+        except BadRequest:
+            raise
+        except (NetworkError, TimeoutError) as exc:
+            if loop.time() + delay >= give_up:
+                raise
+            logger.warning(
+                "Telegram send of %s failed (attempt %d, %s); retrying in %ds",
+                what, attempt, type(exc).__name__, delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+            attempt += 1
+            continue
+        logger.info("Telegram sent %s%s", what, f" after {attempt} attempts" if attempt > 1 else "")
+        return result
+
+
+def _shrink(image: bytes) -> bytes:
+    from PIL import Image
+
+    with Image.open(BytesIO(image)) as photo:
+        if max(photo.size) <= TELEGRAM_MAX_SIDE:
+            return image
+        # JPEG draft mode decodes straight at 1/2 scale (2560 -> 1280): fast on the Pi.
+        photo.draft("RGB", (TELEGRAM_MAX_SIDE, TELEGRAM_MAX_SIDE))
+        photo = photo.convert("RGB")
+        photo.thumbnail((TELEGRAM_MAX_SIDE, TELEGRAM_MAX_SIDE))
+        out = BytesIO()
+        photo.save(out, "JPEG", quality=85)
+        return out.getvalue()
+
+
+async def _for_telegram(image: bytes) -> bytes:
+    try:
+        return await asyncio.to_thread(_shrink, image)
+    except Exception as exc:
+        logger.warning("Could not downscale photo (%s); sending full size", type(exc).__name__)
+        return image
+
+
 def _duration(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     if minutes < 60:
@@ -70,13 +137,23 @@ class TelegramFrontend:
         events: EventBus,
         cameras: Cameras | None = None,
         alarm: Alarm | None = None,
+        siren: SirenControl | None = None,
+        power: PowerMonitor | None = None,
+        starlink: StarlinkMonitor | None = None,
     ) -> None:
         self._config = config
         self._events = events
         self._cameras = cameras if cameras is not None else Cameras(config, events)
         self._alarm = alarm if alarm is not None else Alarm(config.state_file, events)
+        # None means not wired (tests); the status reports only real hardware.
+        self._siren = siren
+        self._power = power
+        self._starlink = starlink
         # The restart notice goes out once per process, not on every reconnect.
         self._announced = False
+        # Photo uploads run beside the event loop, so a slow upload never delays
+        # the next alert's text.
+        self._uploads: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
         # HTTP request URLs contain the bot token. Never log them, even in DEBUG.
@@ -128,6 +205,9 @@ class TelegramFrontend:
                 while True:
                     await self._handle_event(application.bot, await events.get())
             finally:
+                for task in self._uploads:
+                    task.cancel()
+                await asyncio.gather(*self._uploads, return_exceptions=True)
                 if application.updater is not None and application.updater.running:
                     await application.updater.stop()
                 if application.running:
@@ -137,44 +217,119 @@ class TelegramFrontend:
         # A failed alert must not take down polling; log it and wait for the next.
         try:
             if isinstance(event, Intrusion):
-                await self._alert_intrusion(bot, event)
+                self._upload(event.name, self._alert_intrusion(bot, event))
+            elif isinstance(event, Sighting):
+                self._upload(event.name, self._alert_sighting(bot, event))
+            elif isinstance(event, PersonPhoto):
+                self._upload(event.name, self._follow_up(bot, event))
             elif isinstance(event, ModeChanged):
-                await self._broadcast(bot, self._mode_changed_text(event))
+                await self._broadcast(bot, self._mode_changed_text(event), event.name)
             elif isinstance(event, CameraOffline):
-                await self._broadcast(bot, f"Cámara sin conexión: {event.camera} (desde las {event.since:%H:%M})")
+                await self._broadcast(
+                    bot, f"Cámara sin conexión: {event.camera} (desde las {event.since:%H:%M})", event.name
+                )
             elif isinstance(event, CameraOnline):
                 await self._broadcast(
-                    bot, f"Cámara reconectada: {event.camera} (sin conexión {_duration(event.down_seconds)})"
+                    bot, f"Cámara reconectada: {event.camera} (sin conexión {_duration(event.down_seconds)})",
+                    event.name,
+                )
+            elif isinstance(event, PowerLost):
+                await self._broadcast(bot, f"Corte de luz desde las {event.since:%H:%M}", event.name)
+                self._upload(event.name, self._power_photos(bot, event))
+            elif isinstance(event, StarlinkOffline):
+                await self._broadcast(
+                    bot, f"Antena Starlink sin conexión desde las {event.since:%H:%M}, con luz. "
+                    "Revisa el cable de la antena.", event.name,
+                )
+            elif isinstance(event, StarlinkOnline):
+                await self._broadcast(
+                    bot, f"Antena Starlink conectada de nuevo (sin conexión {_duration(event.down_seconds)})",
+                    event.name,
+                )
+            elif isinstance(event, PowerRestored):
+                await self._broadcast(
+                    bot, f"Volvió la luz (sin luz {_duration(event.down_seconds)})", event.name
                 )
         except Exception as exc:
             logger.warning("Alert for %s failed (%s)", event.name, type(exc).__name__)
 
+    def _upload(self, what: str, upload: Coroutine[Any, Any, None]) -> None:
+        async def guarded() -> None:
+            try:
+                await upload
+            except Exception as exc:
+                logger.warning("Alert for %s failed (%s)", what, type(exc).__name__)
+
+        task = asyncio.create_task(guarded(), name=f"telegram-{what}")
+        self._uploads.add(task)
+        task.add_done_callback(self._uploads.discard)
+
     async def _alert_intrusion(self, bot: Bot, event: Intrusion) -> None:
         snapshot = await self._cameras.capture(event.camera)
         text = f"Persona detectada: {event.camera}"
+        if event.siren:
+            text += "\nSirena activada"
+        elif event.unconfirmed:
+            text += f"\nDe noche la sirena suena solo si hay otra detección en {CONFIRM_WINDOW // 60} min"
         if snapshot.image is None:
-            await self._broadcast(bot, f"{text}\nNo se pudo tomar la foto: {snapshot.error}")
+            await self._broadcast(bot, f"{text}\nNo se pudo tomar la foto: {snapshot.error}", event.name)
             return
+        image = await _for_telegram(snapshot.image)
         for chat_id in self._config.telegram_allowed_chat_ids:
-            await _send_with_retry(lambda: bot.send_photo(
-                chat_id, snapshot.image, caption=text, reply_markup=REPLY_MARKUP,
+            await _send_alert(lambda: bot.send_photo(
+                chat_id, image, caption=text, reply_markup=REPLY_MARKUP,
                 filename=f"{snapshot.camera}.jpg", **PHOTO_TIMEOUTS,
-            ), ALERT_ATTEMPTS)
+            ), f"{event.name} photo", PHOTO_ATTEMPT_TIMEOUT)
+
+    async def _alert_sighting(self, bot: Bot, event: Sighting) -> None:
+        text = f"{SIGHTING_TEXT.get(event.kind, event.kind)}: {event.camera}"
+        snapshot = await self._cameras.capture(event.camera)
+        if snapshot.image is None:
+            await self._broadcast(bot, f"{text}\nNo se pudo tomar la foto: {snapshot.error}", event.name)
+            return
+        image = await _for_telegram(snapshot.image)
+        for chat_id in self._config.telegram_allowed_chat_ids:
+            await _send_alert(lambda: bot.send_photo(
+                chat_id, image, caption=text, reply_markup=REPLY_MARKUP,
+                filename=f"{snapshot.camera}.jpg", **PHOTO_TIMEOUTS,
+            ), f"{event.name} photo", PHOTO_ATTEMPT_TIMEOUT)
+
+    async def _follow_up(self, bot: Bot, event: PersonPhoto) -> None:
+        image = await _for_telegram(event.image)
+        text = f"{event.camera}: persona aún detectada ({event.seconds} s)"
+        for chat_id in self._config.telegram_allowed_chat_ids:
+            await _send_alert(lambda: bot.send_photo(
+                chat_id, image, caption=text, reply_markup=REPLY_MARKUP,
+                filename=f"{event.camera}.jpg", **PHOTO_TIMEOUTS,
+            ), f"{event.name}", PHOTO_ATTEMPT_TIMEOUT)
+
+    async def _power_photos(self, bot: Bot, event: PowerLost) -> None:
+        # Cameras and the Pi are on the UPS, so photos should still work.
+        snapshots = await self._cameras.capture_all() if self._cameras.configured else []
+        media = [
+            InputMediaPhoto(await _for_telegram(snapshot.image), filename=f"{snapshot.camera}.jpg")
+            for snapshot in snapshots if snapshot.image is not None
+        ]
+        if not media:
+            return
+        caption = f"Fotos del corte de luz de las {event.since:%H:%M}"
+        for chat_id in self._config.telegram_allowed_chat_ids:
+            await _send_alert(lambda: bot.send_media_group(
+                chat_id, media, caption=caption, **PHOTO_TIMEOUTS,
+            ), f"{event.name} photos", PHOTO_ATTEMPT_TIMEOUT)
 
     async def _announce_restart(self, bot: Bot) -> None:
         text = f"Rancho reiniciado. {self._status_text()}"
         if self._alarm.load_failed:
             text += "\nNo se pudo leer el estado guardado; la alarma quedó desarmada."
         try:
-            await self._broadcast(bot, text)
-        except TelegramError as exc:
+            await self._broadcast(bot, text, "restart notice")
+        except (TelegramError, TimeoutError) as exc:
             logger.warning("Restart notice failed (%s)", type(exc).__name__)
 
-    async def _broadcast(self, bot: Bot, text: str) -> None:
+    async def _broadcast(self, bot: Bot, text: str, what: str = "message") -> None:
         for chat_id in self._config.telegram_allowed_chat_ids:
-            await _send_with_retry(
-                lambda: bot.send_message(chat_id, text, reply_markup=REPLY_MARKUP), ALERT_ATTEMPTS
-            )
+            await _send_alert(lambda: bot.send_message(chat_id, text, reply_markup=REPLY_MARKUP), what)
 
     def _mode_changed_text(self, event: ModeChanged) -> str:
         if event.mode == AlarmMode.ARMED:
@@ -192,6 +347,18 @@ class TelegramFrontend:
             text += f" ({alarm.by})"
         if alarm.sleeping and alarm.sleep_until is not None:
             text += f"\nAlertas en pausa hasta {alarm.sleep_until:%d/%m %H:%M}"
+        power = self._power
+        if power is not None:
+            if not power.available:
+                text += "\nSensor de luz no disponible (revisa el journal)"
+            elif power.present is False and power.off_at is not None:
+                text += f"\nSin luz desde las {power.off_at:%H:%M}"
+            elif power.present:
+                text += "\nLuz: normal"
+        if self._starlink is not None and self._starlink.online is not None:
+            text += "\nAntena Starlink: " + ("conectada" if self._starlink.online else "sin conexión")
+        if self._siren is not None and not self._siren.available:
+            text += "\nSirena no disponible (revisa el journal)"
         return text
 
     def _allowed_message(self, update: Update) -> Message | None:
@@ -291,10 +458,10 @@ class TelegramFrontend:
                 failures.append(f"{snapshot.camera}: {snapshot.error}")
                 continue
             try:
-                # Bind this snapshot for every retry. Images stay in memory.
-                async def send_photo(snapshot=snapshot):
+                # Bind this photo for every retry. Images stay in memory.
+                async def send_photo(snapshot=snapshot, image=await _for_telegram(snapshot.image)):
                     return await message.reply_photo(
-                        photo=snapshot.image,
+                        photo=image,
                         filename=f"{snapshot.camera}.jpg",
                         **PHOTO_TIMEOUTS,
                     )

@@ -1,4 +1,4 @@
-"""Alarm mode, alert sleep, intrusion cooldown, and persistence to state.json."""
+"""Alarm mode, alert sleep, intrusion cooldown, siren decisions, and persistence to state.json."""
 
 import json
 import logging
@@ -9,13 +9,27 @@ from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 
-from rancho.core.events import EventBus, Intrusion, ModeChanged, PersonDetected
+from rancho.core.events import (
+    EventBus, Intrusion, ModeChanged, ObjectDetected, PersonDetected, SirenTriggered, Sighting,
+)
 
 logger = logging.getLogger(__name__)
 # Per camera: someone walking around the house would otherwise send a stream.
 INTRUSION_COOLDOWN = 60
 # Upper bound for /pausa, so a typo cannot silence the alarm for days.
 MAX_SLEEP_HOURS = 24
+SIREN_SECONDS = 5
+# Vehicles and animals (cameras.yaml `alerts`): a photo while armed, never the
+# siren. Per camera and type, so an animal hanging around doesn't flood the chat.
+SIGHTING_COOLDOWN = 300
+# At most one siren burst per this many seconds, from any camera.
+SIREN_COOLDOWN = 60
+# IR-mode false positives: at night the siren needs a second person detection
+# (any camera) within CONFIRM_WINDOW seconds. Photos are sent either way.
+# Equal hours disable the night rule.
+NIGHT_START_HOUR = 19
+NIGHT_END_HOUR = 7
+CONFIRM_WINDOW = 120
 
 
 class AlarmMode(str, Enum):
@@ -29,14 +43,19 @@ class Alarm:
         path: Path,
         events: EventBus,
         clock: Callable[[], float] = time.monotonic,
+        local_now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
     ) -> None:
         self._path = path
         self._events = events
         self._clock = clock
+        self._local_now = local_now
         # Alert sleep lives in memory only: a restart resumes alerts.
         self._sleep_deadline: float | None = None
         self.sleep_until: datetime | None = None
         self._last_intrusion: dict[str, float] = {}
+        self._last_sighting: dict[tuple[str, str], float] = {}
+        self._last_siren: float | None = None
+        self._detections: list[float] = []
         self.mode = AlarmMode.DISARMED
         self.since = datetime.now().astimezone()
         self.by: str | None = None
@@ -101,6 +120,8 @@ class Alarm:
                 event = await events.get()
                 if isinstance(event, PersonDetected):
                     self._on_person(event)
+                elif isinstance(event, ObjectDetected):
+                    self._on_object(event)
         finally:
             self._events.unsubscribe(events)
 
@@ -111,17 +132,50 @@ class Alarm:
             logger.info("Camera %s: person detected while alerts asleep; not alerting", event.camera)
             return
         now = self._clock()
+        self._detections = [t for t in self._detections if now - t < CONFIRM_WINDOW] + [now]
+        confirmed = not self.night() or len(self._detections) >= 2
+        siren = confirmed and (self._last_siren is None or now - self._last_siren >= SIREN_COOLDOWN)
         last = self._last_intrusion.get(event.camera)
-        if last is not None and now - last < INTRUSION_COOLDOWN:
+        # A siren burst always comes with a photo, even within the photo cooldown.
+        if siren or last is None or now - last >= INTRUSION_COOLDOWN:
+            self._last_intrusion[event.camera] = now
+            logger.warning("Intrusion: person on %s while armed", event.camera)
+            self._events.publish(Intrusion(camera=event.camera, siren=siren, unconfirmed=not confirmed))
+        else:
             logger.info("Camera %s: intrusion within cooldown; not alerting", event.camera)
+        if not confirmed:
+            logger.info("Camera %s: night detection; siren waits for confirmation", event.camera)
+        if siren:
+            self._last_siren = now
+            self._events.publish(SirenTriggered(camera=event.camera, seconds=SIREN_SECONDS))
+
+    def _on_object(self, event: ObjectDetected) -> None:
+        if self.mode != AlarmMode.ARMED:
             return
-        self._last_intrusion[event.camera] = now
-        logger.warning("Intrusion: person on %s while armed", event.camera)
-        self._events.publish(Intrusion(camera=event.camera))
+        if self.sleeping:
+            logger.info("Camera %s: %s detected while alerts asleep; not alerting", event.camera, event.kind)
+            return
+        now = self._clock()
+        key = (event.camera, event.kind)
+        last = self._last_sighting.get(key)
+        if last is not None and now - last < SIGHTING_COOLDOWN:
+            logger.info("Camera %s: %s within cooldown; not alerting", event.camera, event.kind)
+            return
+        self._last_sighting[key] = now
+        logger.info("Sighting: %s on %s", event.kind, event.camera)
+        self._events.publish(Sighting(camera=event.camera, kind=event.kind))
+
+    def night(self) -> bool:
+        hour = self._local_now().hour
+        if NIGHT_START_HOUR <= NIGHT_END_HOUR:
+            return NIGHT_START_HOUR <= hour < NIGHT_END_HOUR
+        return hour >= NIGHT_START_HOUR or hour < NIGHT_END_HOUR
 
     def _set(self, mode: AlarmMode, by: str) -> None:
         self.mode, self.since, self.by = mode, datetime.now().astimezone(), by
         self._last_intrusion.clear()
+        self._last_siren = None
+        self._detections.clear()
         logger.info("Alarm %s by %s", mode.value, by)
         self._save()
         self._events.publish(ModeChanged(mode=mode.value, by=by))
