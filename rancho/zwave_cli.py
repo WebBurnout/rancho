@@ -15,6 +15,7 @@ from zwave_js_server.client import Client
 from zwave_js_server.const import InclusionStrategy, NodeStatus, SecurityClass
 from zwave_js_server.exceptions import BaseZwaveJSServerError, CannotConnect, RssiErrorReceived
 from zwave_js_server.model.controller import Controller
+from zwave_js_server.model.controller.rebuild_routes import RebuildRoutesOptions, RebuildRoutesStatus
 from zwave_js_server.model.node import Node
 
 URL = "ws://127.0.0.1:3000"
@@ -79,6 +80,25 @@ def signal(node: Node) -> int | None:
         return None
 
 
+def route(node: Node) -> str | None:
+    """The last route the controller reached the node on, if it has one."""
+    lwr = node.statistics.lwr
+    if lwr is None:
+        return None
+    if not lwr.repeaters:
+        return "route direct"
+    return "route via " + " > ".join(str(repeater.node_id) for repeater in lwr.repeaters)
+
+
+def traffic(node: Node) -> str:
+    stats = node.statistics
+    return (
+        f"received {stats.commands_rx}, dropped {stats.commands_dropped_rx}, "
+        f"sent {stats.commands_tx}, failed {stats.commands_dropped_tx}, "
+        f"timeouts {stats.timeout_response} since zwave.service started"
+    )
+
+
 def noise(controller: Controller) -> str | None:
     background = controller.statistics.background_rssi
     if background is None:
@@ -94,9 +114,14 @@ def summary(node: Node) -> str:
         parts.append(level)
     if (rssi := signal(node)) is not None:
         parts.append(f"signal {rssi} dBm")
+    if not node.is_controller_node and (path := route(node)):
+        parts.append(path)
     if node.last_seen:
         parts.append(f"last seen {node.last_seen.astimezone():%Y-%m-%d %H:%M}")
-    return f"{node.node_id:>4}  {describe(node)}\n      {', '.join(parts)}"
+    lines = [f"{node.node_id:>4}  {describe(node)}", ', '.join(parts)]
+    if not node.is_controller_node:
+        lines.append(traffic(node))
+    return "\n      ".join(lines)
 
 
 async def list_nodes(controller: Controller, args: argparse.Namespace) -> int:
@@ -266,6 +291,74 @@ async def remove_failed(controller: Controller, args: argparse.Namespace) -> int
     return 0
 
 
+async def rebuild_node(controller: Controller, node_id: int) -> int:
+    node = controller.nodes.get(node_id)
+    if node is None:
+        print(f"No node {node_id}.")
+        return 1
+    if node.is_controller_node:
+        print("The controller has no routes of its own to rebuild.")
+        return 1
+    if node.status == NodeStatus.ASLEEP:
+        print(f"Node {node_id} is asleep; wake it up now (remove its cover). Ctrl-C to give up.")
+    else:
+        print(f"Rebuilding routes for node {node_id}...")
+    if not await controller.async_rebuild_node_routes(node):
+        print(f"Rebuilding routes for node {node_id} failed.")
+        return 1
+    print(f"Node {node_id}: routes rebuilt.")
+    return 0
+
+
+def show_rebuild(statuses: dict[Node, RebuildRoutesStatus], shown: dict[int, RebuildRoutesStatus]) -> None:
+    for node, status in sorted(statuses.items(), key=lambda item: item[0].node_id):
+        if shown.get(node.node_id) == status:
+            continue
+        shown[node.node_id] = status
+        asleep = status == RebuildRoutesStatus.PENDING and not node.is_listening
+        note = " (waits for its next wake-up)" if asleep else ""
+        print(f"{datetime.now():%H:%M:%S}  node {node.node_id}  {status.value}{note}", flush=True)
+
+
+def only_sleepers_left(statuses: dict[Node, RebuildRoutesStatus]) -> bool:
+    pending = [node for node, status in statuses.items() if status == RebuildRoutesStatus.PENDING]
+    return all(node.is_listening is False for node in pending)
+
+
+async def rebuild_routes(controller: Controller, args: argparse.Namespace) -> int:
+    if args.node is not None:
+        return await rebuild_node(controller, args.node)
+    events = Events(controller, "rebuild routes progress", "rebuild routes done")
+    try:
+        if controller.is_rebuilding_routes:
+            print("A rebuild is already running.")
+        elif await controller.async_begin_rebuilding_routes(RebuildRoutesOptions(include_sleeping=True)):
+            print("Rebuilding routes for every device.")
+        else:
+            print("Could not start rebuilding routes.")
+            return 1
+        shown: dict[int, RebuildRoutesStatus] = {}
+        show_rebuild(controller.rebuild_routes_progress or {}, shown)
+        while True:
+            progress = controller.rebuild_routes_progress or {}
+            if not args.follow and progress and only_sleepers_left(progress):
+                # zwave.service finishes the sleeping devices without this connection.
+                print("Sleeping devices are done at their next wake-up (remove a sensor's cover to wake it).")
+                print("Run again to check progress, or add --follow to watch.")
+                return 0
+            name, _ = await events.next(None)
+            if name == "rebuild routes done":
+                result = controller.last_rebuild_routes_result or {}
+                show_rebuild(result, shown)
+                failed = sorted(node.node_id for node, status in result.items()
+                                if status == RebuildRoutesStatus.FAILED)
+                print(f"Done; failed: {', '.join(map(str, failed))}." if failed else "Done.")
+                return 1 if failed else 0
+            show_rebuild(controller.rebuild_routes_progress or {}, shown)
+    finally:
+        events.close()
+
+
 async def run(args: argparse.Namespace) -> int:
     async with aiohttp.ClientSession() as http:
         client = Client(URL, http)
@@ -306,6 +399,14 @@ def main() -> None:
     remove_parser = commands.add_parser("remove-failed", help="drop a dead device from the controller")
     remove_parser.add_argument("node", type=int)
     remove_parser.set_defaults(action=remove_failed)
+    rebuild_parser = commands.add_parser(
+        "rebuild-routes", help="find new routes for every device, or just NODE, e.g. after moving a repeater"
+    )
+    rebuild_parser.add_argument("node", type=int, nargs="?")
+    rebuild_parser.add_argument(
+        "--follow", action="store_true", help="keep watching until sleeping devices are done too"
+    )
+    rebuild_parser.set_defaults(action=rebuild_routes)
     args = parser.parse_args()
     try:
         code = asyncio.run(run(args))

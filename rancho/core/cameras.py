@@ -154,7 +154,8 @@ class _Camera:
                 raise
             except Exception as exc:
                 # Library exceptions/URLs may contain credentials: log types only.
-                logger.warning("Camera %s: connection failed (%s); retrying in 10s", self.label, type(exc).__name__)
+                # Debug: retries are noisy; the health monitor alerts on outages.
+                logger.debug("Camera %s: connection failed (%s); retrying in 10s", self.label, type(exc).__name__)
             finally:
                 await self._close()
             await asyncio.sleep(10)

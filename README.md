@@ -282,12 +282,21 @@ Defined with taskipy in `pyproject.toml`:
 uv run task test      # offline test suite (pytest)
 uv run task logs      # follow the service journal
 uv run task restart   # sudo systemctl restart rancho.service
-uv run task zwave list                 # paired Z-Wave devices: status, security, battery
+uv run task zwave list                 # paired Z-Wave devices: status, security, battery, route, traffic
 uv run task zwave watch                # print device reports as they arrive
 uv run task zwave include              # pair a device; asks for its S2 PIN if it has one
 uv run task zwave exclude              # unpair, or reset a device paired elsewhere
 uv run task zwave remove-failed NODE   # drop a dead device
+uv run task zwave rebuild-routes [NODE]  # new routes for every device, or one; after moving a repeater
 ```
+
+`rebuild-routes` without a node does every device. It exits once the awake
+devices are done; `zwave.service` does each sleeping sensor at its next wake-up
+(every 4 h), or right away if you remove its cover. Run it again to see
+progress, or add `--follow` to watch until the sensors are done. In `list`,
+“route via 7” is the last route the controller reached the device on (“route
+direct” means no repeater), and the traffic counters reset when
+`zwave.service` restarts.
 
 The `zwave` task talks to `zwave.service` (see [INSTALL.md](INSTALL.md#8-z-wave-js-server))
 over its own connection, so Rancho can keep running.
