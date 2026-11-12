@@ -10,3 +10,5 @@ dist/
 /state.json
 /state.json.*
 /photos/
+/zwave/node_modules/
+/zwave/cache/

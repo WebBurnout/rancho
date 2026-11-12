@@ -10,7 +10,8 @@ from enum import Enum
 from pathlib import Path
 
 from rancho.core.events import (
-    EventBus, Intrusion, ModeChanged, ObjectDetected, PersonDetected, SirenTriggered, Sighting,
+    EventBus, Intrusion, ModeChanged, ObjectDetected, PersonDetected, SensorIntrusion, SensorOpened,
+    SirenTriggered, Sighting,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ INTRUSION_COOLDOWN = 60
 # Upper bound for /pausa, so a typo cannot silence the alarm for days.
 MAX_SLEEP_HOURS = 24
 SIREN_SECONDS = 5
-# Vehicles and animals (cameras.yaml `alerts`): a photo while armed, never the
+# Vehicles and animals (config.yaml `alerts`): a photo while armed, never the
 # siren. Per camera and type, so an animal hanging around doesn't flood the chat.
 SIGHTING_COOLDOWN = 300
 # At most one siren burst per this many seconds, from any camera.
@@ -37,6 +38,14 @@ class AlarmMode(str, Enum):
     ARMED = "armed"
 
 
+class ArmingBlocked(Exception):
+    """Arming was refused because these sensors are open."""
+
+    def __init__(self, sensors: list[str]) -> None:
+        super().__init__(", ".join(sensors))
+        self.sensors = sensors
+
+
 class Alarm:
     def __init__(
         self,
@@ -44,11 +53,13 @@ class Alarm:
         events: EventBus,
         clock: Callable[[], float] = time.monotonic,
         local_now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+        open_sensors: Callable[[], list[str]] = list,
     ) -> None:
         self._path = path
         self._events = events
         self._clock = clock
         self._local_now = local_now
+        self._open_sensors = open_sensors
         # Alert sleep lives in memory only: a restart resumes alerts.
         self._sleep_deadline: float | None = None
         self.sleep_until: datetime | None = None
@@ -78,9 +89,15 @@ class Alarm:
         logger.info("Alarm restored: %s", self.mode.value)
 
     def arm(self, by: str) -> bool:
-        """Arm immediately, ending any alert sleep. Returns False if already armed."""
+        """Arm immediately, ending any alert sleep. Returns False if already armed.
+
+        Raises ArmingBlocked while a sensor is open.
+        """
         if self.mode == AlarmMode.ARMED:
             return False
+        if open_sensors := self._open_sensors():
+            logger.info("Arming by %s refused: open %s", by, ", ".join(open_sensors))
+            raise ArmingBlocked(open_sensors)
         if self._sleep_deadline is not None:
             self._sleep_deadline = self.sleep_until = None
             logger.info("Alert sleep cleared by arming")
@@ -122,6 +139,8 @@ class Alarm:
                     self._on_person(event)
                 elif isinstance(event, ObjectDetected):
                     self._on_object(event)
+                elif isinstance(event, SensorOpened):
+                    self._on_sensor(event)
         finally:
             self._events.unsubscribe(events)
 
@@ -147,7 +166,18 @@ class Alarm:
             logger.info("Camera %s: night detection; siren waits for confirmation", event.camera)
         if siren:
             self._last_siren = now
-            self._events.publish(SirenTriggered(camera=event.camera, seconds=SIREN_SECONDS))
+            self._events.publish(SirenTriggered(source=event.camera, seconds=SIREN_SECONDS))
+
+    def _on_sensor(self, event: SensorOpened) -> None:
+        # A window opening is a strong signal: no night confirmation or cooldown.
+        if self.mode != AlarmMode.ARMED:
+            return
+        if self.sleeping:
+            logger.info("Sensor %s opened while alerts asleep; not alerting", event.sensor)
+            return
+        logger.warning("Intrusion: sensor %s opened while armed", event.sensor)
+        self._events.publish(SensorIntrusion(sensor=event.sensor))
+        self._events.publish(SirenTriggered(source=event.sensor, seconds=SIREN_SECONDS))
 
     def _on_object(self, event: ObjectDetected) -> None:
         if self.mode != AlarmMode.ARMED:

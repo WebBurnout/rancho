@@ -1,0 +1,32 @@
+[Unit]
+Description=Z-Wave JS server (ZAC93 on /dev/serial0)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=tim
+Group=tim
+# /dev/ttyAMA0 is root:dialout.
+SupplementaryGroups=dialout
+WorkingDirectory=/home/tim/rancho/zwave
+# Security keys (ZWAVE_*); see .env.example.
+EnvironmentFile=/home/tim/rancho/.env
+# Debian's node, not nvm's, so the service doesn't change when nvm does.
+# Localhost only: Rancho is the only client.
+ExecStart=/usr/bin/node /home/tim/rancho/zwave/node_modules/.bin/zwave-server /dev/serial0 --config /home/tim/rancho/zwave/config.cjs --host 127.0.0.1 --port 3000 --disable-dns-sd
+Environment=NODE_ENV=production
+UMask=0077
+# On driver failure the server exits; systemd restarts it.
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zwave
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/tim/rancho/zwave/cache
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 # Rancho alarm
 
-One Python 3.11+ asyncio service for Raspberry Pi OS Lite, managed by systemd.
+One Python 3.12+ asyncio service for Raspberry Pi OS Lite, managed by systemd.
 One checkout at `/home/tim/rancho`, one uv-managed venv, no deployment copies.
 Logs go to stdout/stderr and are captured by journald; no file logging.
 
@@ -41,9 +41,9 @@ using it must send messages only.
 
 | Command | Button | |
 |---|---|---|
-| `/armar` | Armar | Arms immediately |
+| `/armar` | Armar | Arms immediately; refused while a sensor is open |
 | `/desarmar` | Desarmar | Disarms |
-| `/estado` | Estado | Mode, since when, who changed it, and any alert pause |
+| `/estado` | Estado | Mode, since when, who changed it, any alert pause, cameras, and sensors |
 | `/foto` | Foto | Photos from all cameras |
 | `/pausa <hours>` | | Pauses intrusion alerts (default 1, max 24); `/pausa 0` or arming resumes them |
 | `/ayuda` | | Command list |
@@ -96,7 +96,7 @@ connection and reconnect loop.
 
 Send `/foto` in an allowed chat to get fresh photos from all Reolink
 cameras. Snapshots are fetched concurrently, held in memory, and sent without
-captions, in the order of `cameras.yaml`. If one camera fails, the others still
+captions, in the order of `config.yaml`. If one camera fails, the others still
 send, and a message names the camera that failed.
 
 1. Enable **Basic service** (port 9000) in each camera's network/server
@@ -177,6 +177,39 @@ Both use the GPIO character device through `gpiod` (the service gets the
   luz N min)”. Power cuts never sound the siren, and they alert whether or not
   the alarm is armed. `/estado` shows the mains state.
 
+## Door and window sensors
+
+Z-Wave sensors are listed under `sensors` in `config.yaml`, by the node number
+`uv run task zwave list` shows. Rancho is a client of `zwave.service` (see
+[INSTALL.md](INSTALL.md#8-z-wave-js-server)) on `ws://127.0.0.1:3000`, and
+reconnects every 5 s if it goes away.
+
+```yaml
+sensors:
+  - name: Ventana cocina
+    node: 4
+```
+
+- **Open while armed:** “Sensor abierto: <name>” and the siren for 5 s, at any
+  hour and on every opening (no night confirmation or cooldown). Nothing while
+  disarmed or while alerts are paused with `/pausa`.
+- **Arming** is refused while a sensor is open: “No se puede armar: sensor
+  abierto: <names>”. A sensor whose state isn't known yet doesn't block it.
+- **Cover removed:** “Tapa del sensor quitada: <name>”, armed or not.
+- **Silent:** a battery sensor wakes on an interval (4 h on the Ecolink) even
+  when nothing happens. After two missed wake-ups plus 10 min, “Sensor sin señal
+  desde las HH:MM: <name>…”, armed or not, and “Sensor con señal de nuevo” when
+  it is heard. A listed node that isn't paired is reported at once.
+- **Server down:** if `zwave.service` can't be reached for 60 s, “Z-Wave sin
+  conexión…: los sensores no funcionan”, then “Z-Wave conectado de nuevo” with the
+  duration. Silence isn't reported while the server is down.
+
+`/estado` lists each sensor: open, closed, or “comprobando…” until it is known,
+plus a removed cover, silence, and the battery level. Open/closed comes from the
+sensor's Access Control notification (and its binary report); a change that
+happens while Rancho is disconnected is reported on reconnect. Timings are
+constants in `rancho/core/sensors.py`.
+
 ## Starlink dish
 
 The dish is on the roof, so its cable could be cut. Every 15 s Rancho opens a TCP
@@ -220,7 +253,7 @@ the chat or the SIM; archiving continues. Timings are constants in
 
 ### Animal and vehicle alerts
 
-Each camera in `cameras.yaml` can list `alerts`: `person` (the default),
+Each camera in `config.yaml` can list `alerts`: `person` (the default),
 `vehicle`, `animal`. Persons follow the alarm (photo and siren while armed).
 Vehicles and animals send one photo (“Animal detectado: Bomba”) only while
 armed, at most every 5 min per camera and type
@@ -249,7 +282,15 @@ Defined with taskipy in `pyproject.toml`:
 uv run task test      # offline test suite (pytest)
 uv run task logs      # follow the service journal
 uv run task restart   # sudo systemctl restart rancho.service
+uv run task zwave list                 # paired Z-Wave devices: status, security, battery
+uv run task zwave watch                # print device reports as they arrive
+uv run task zwave include              # pair a device; asks for its S2 PIN if it has one
+uv run task zwave exclude              # unpair, or reset a device paired elsewhere
+uv run task zwave remove-failed NODE   # drop a dead device
 ```
+
+The `zwave` task talks to `zwave.service` (see [INSTALL.md](INSTALL.md#8-z-wave-js-server))
+over its own connection, so Rancho can keep running.
 
 ## Offline tests
 
@@ -260,8 +301,10 @@ uv run --frozen --no-sync task test
 These tests replace the Reolink clients and Telegram sending, and exercise
 snapshots, push transitions, cleanup, partial failures, the chat allow-list,
 send retries, alarm modes, alert sleep, cooldown, night siren confirmation, the
-siren timer, power-cut debouncing, state persistence, and the sentinel's down/up
-alerts with faked ping. They do not open camera connections or GPIO lines.
+siren timer, power-cut debouncing, state persistence, sensor open/close, tamper,
+silence and server outages with fake Z-Wave nodes, arming refused while open,
+and the sentinel's down/up alerts with faked ping. They do not open camera,
+Z-Wave, or GPIO connections.
 
 ## Deploy an update
 

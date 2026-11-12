@@ -1,3 +1,5 @@
+# Rancho's devices. Secrets stay in .env.
+#
 # Camera names appear in Telegram messages and alerts. Photos arrive in this order.
 # Credentials stay in .env (CAMERA_USERNAME / CAMERA_PASSWORD).
 #
@@ -16,3 +18,14 @@ cameras:
     host: 10.10.0.12
   - name: Cocina
     host: 10.10.0.13
+
+# Z-Wave door/window sensors. `node` is the number from `uv run task zwave list`.
+# Opening one while armed sounds the siren; arming is refused while one is open.
+# A removed cover or a sensor that goes silent alerts whether armed or not.
+sensors:
+  - name: Ventana cocina
+    node: 4
+  - name: Ventana leña
+    node: 5
+  - name: Ventana starlink
+    node: 6

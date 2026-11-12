@@ -34,6 +34,15 @@ class Snapshot:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class CameraStatus:
+    camera: str
+    # Last health check; None until the first check after start.
+    online: bool | None
+    # Wall-clock start of the current outage, while offline.
+    since: datetime | None = None
+
+
 def _new_host(address: str, config: Config) -> Host:
     # Imported only when starting a camera connection. Offline tests replace this
     # factory and never instantiate the library's network clients.
@@ -72,6 +81,11 @@ class _Camera:
         self._down_since: float | None = None
         self._down_at: datetime | None = None
         self._offline_reported = False
+        self._online: bool | None = None
+
+    @property
+    def status(self) -> CameraStatus:
+        return CameraStatus(self.name, self._online, None if self._online else self._down_at)
 
     def _on_push(self) -> None:
         client = self._client
@@ -168,6 +182,7 @@ class _Camera:
         return True
 
     def _check_health(self, online: bool, now: float) -> None:
+        self._online = online
         if online:
             if self._offline_reported and self._down_since is not None:
                 down = now - self._down_since
@@ -243,7 +258,7 @@ class Cameras:
         # Our adapter reports camera addresses and exception types instead.
         logging.getLogger("reolink_aio").setLevel(logging.CRITICAL)
         if not self._cameras:
-            logger.warning("Cameras disabled: no cameras in cameras.yaml")
+            logger.warning("Cameras disabled: no cameras in config.yaml")
             await asyncio.Future()
             return
         if not self.configured:
@@ -255,9 +270,12 @@ class Cameras:
                 tasks.create_task(camera.run(), name=f"camera-{camera.address}")
                 tasks.create_task(camera.monitor(), name=f"camera-health-{camera.address}")
 
+    def status(self) -> list[CameraStatus]:
+        return [camera.status for camera in self._cameras]
+
     async def capture(self, name: str) -> Snapshot:
         if not self.configured:
-            raise ValueError("Cameras need cameras.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
+            raise ValueError("Cameras need config.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
         for camera in self._cameras:
             if camera.name == name:
                 return await self._keep(await camera.snapshot())
@@ -265,7 +283,7 @@ class Cameras:
 
     async def capture_all(self) -> list[Snapshot]:
         if not self.configured:
-            raise ValueError("Cameras need cameras.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
+            raise ValueError("Cameras need config.yaml plus CAMERA_USERNAME and CAMERA_PASSWORD in .env")
         snapshots = await asyncio.gather(*(camera.snapshot() for camera in self._cameras))
         return list(await asyncio.gather(*(self._keep(snapshot) for snapshot in snapshots)))
 

@@ -1,7 +1,8 @@
 [Unit]
 Description=Rancho alarm service
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target zwave.service
+# Only ordering: Rancho runs (and reports Z-Wave offline) without it.
+After=network-online.target zwave.service
 StartLimitIntervalSec=0
 
 [Service]

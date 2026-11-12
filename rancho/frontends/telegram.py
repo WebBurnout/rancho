@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
+from datetime import datetime
 from io import BytesIO
 from typing import Any, TypeVar
 
@@ -14,12 +15,14 @@ from rancho.core.cameras import Cameras
 from rancho.core.config import Config
 from rancho.core.events import (
     CameraOffline, CameraOnline, Event, EventBus, Intrusion, ModeChanged, PersonPhoto, PowerLost, PowerRestored,
-    Sighting, StarlinkOffline, StarlinkOnline,
+    SensorHeard, SensorIntrusion, SensorSilent, SensorTamper, Sighting, StarlinkOffline, StarlinkOnline,
+    ZwaveOffline, ZwaveOnline,
 )
 from rancho.core.power import PowerMonitor
+from rancho.core.sensors import Sensors, SensorStatus
 from rancho.core.siren import SirenControl
 from rancho.core.starlink import StarlinkMonitor
-from rancho.core.state import CONFIRM_WINDOW, MAX_SLEEP_HOURS, Alarm, AlarmMode
+from rancho.core.state import CONFIRM_WINDOW, MAX_SLEEP_HOURS, Alarm, AlarmMode, ArmingBlocked
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -28,7 +31,7 @@ HELP_TEXT = (
     "Comandos:\n"
     "/armar — activar la alarma\n"
     "/desarmar — desactivar la alarma\n"
-    "/estado — estado de la alarma\n"
+    "/estado — estado de la alarma, las cámaras y los sensores\n"
     "/foto — fotos de todas las cámaras\n"
     "/pausa 1 — pausa las alertas 1 hora (/pausa 0 las reactiva)\n"
     "/ayuda — muestra esta lista"
@@ -130,6 +133,27 @@ def _duration(seconds: float) -> str:
     return f"{minutes // 60} h {minutes % 60} min"
 
 
+def _sensor_state(status: SensorStatus) -> str:
+    parts = [{None: "comprobando…", True: "abierto", False: "cerrado"}[status.open]]
+    if status.tampered:
+        parts.append("tapa quitada")
+    if status.silent:
+        parts.append(f"sin señal desde las {status.last_seen:%H:%M}" if status.last_seen else "sin señal")
+    if status.battery is not None:
+        parts.append(f"batería {status.battery}%")
+    return ", ".join(parts)
+
+
+def _link_state(online: bool | None, since: datetime | None) -> str:
+    if online is None:
+        return "comprobando…"
+    if online:
+        return "conectada"
+    if since is not None:
+        return f"sin conexión desde las {since:%H:%M}"
+    return "sin conexión"
+
+
 class TelegramFrontend:
     def __init__(
         self,
@@ -140,6 +164,7 @@ class TelegramFrontend:
         siren: SirenControl | None = None,
         power: PowerMonitor | None = None,
         starlink: StarlinkMonitor | None = None,
+        sensors: Sensors | None = None,
     ) -> None:
         self._config = config
         self._events = events
@@ -149,6 +174,7 @@ class TelegramFrontend:
         self._siren = siren
         self._power = power
         self._starlink = starlink
+        self._sensors = sensors
         # The restart notice goes out once per process, not on every reconnect.
         self._announced = False
         # Photo uploads run beside the event loop, so a slow upload never delays
@@ -250,6 +276,30 @@ class TelegramFrontend:
                 await self._broadcast(
                     bot, f"Volvió la luz (sin luz {_duration(event.down_seconds)})", event.name
                 )
+            elif isinstance(event, SensorIntrusion):
+                await self._broadcast(bot, f"Sensor abierto: {event.sensor}\nSirena activada", event.name)
+            elif isinstance(event, SensorTamper):
+                await self._broadcast(bot, f"Tapa del sensor quitada: {event.sensor}", event.name)
+            elif isinstance(event, SensorSilent):
+                since = f" desde las {event.since:%H:%M}" if event.since else ""
+                await self._broadcast(
+                    bot, f"Sensor sin señal{since}: {event.sensor}. Revisa la batería o si está emparejado.",
+                    event.name,
+                )
+            elif isinstance(event, SensorHeard):
+                await self._broadcast(
+                    bot, f"Sensor con señal de nuevo: {event.sensor} (sin señal {_duration(event.silent_seconds)})",
+                    event.name,
+                )
+            elif isinstance(event, ZwaveOffline):
+                await self._broadcast(
+                    bot, f"Z-Wave sin conexión desde las {event.since:%H:%M}: los sensores no funcionan. "
+                    "Revisa zwave.service.", event.name,
+                )
+            elif isinstance(event, ZwaveOnline):
+                await self._broadcast(
+                    bot, f"Z-Wave conectado de nuevo (sin conexión {_duration(event.down_seconds)})", event.name
+                )
         except Exception as exc:
             logger.warning("Alert for %s failed (%s)", event.name, type(exc).__name__)
 
@@ -319,7 +369,8 @@ class TelegramFrontend:
             ), f"{event.name} photos", PHOTO_ATTEMPT_TIMEOUT)
 
     async def _announce_restart(self, bot: Bot) -> None:
-        text = f"Rancho reiniciado. {self._status_text()}"
+        # Cameras and Starlink are not checked yet at start; offline alerts follow if needed.
+        text = f"Rancho reiniciado. {self._status_text(links=False)}"
         if self._alarm.load_failed:
             text += "\nNo se pudo leer el estado guardado; la alarma quedó desarmada."
         try:
@@ -336,7 +387,7 @@ class TelegramFrontend:
             return f"Alarma armada ({event.by})"
         return f"Alarma desarmada ({event.by})"
 
-    def _status_text(self) -> str:
+    def _status_text(self, links: bool = True) -> str:
         alarm = self._alarm
         label = {
             AlarmMode.DISARMED: "Alarma desarmada",
@@ -355,10 +406,20 @@ class TelegramFrontend:
                 text += f"\nSin luz desde las {power.off_at:%H:%M}"
             elif power.present:
                 text += "\nLuz: normal"
-        if self._starlink is not None and self._starlink.online is not None:
-            text += "\nAntena Starlink: " + ("conectada" if self._starlink.online else "sin conexión")
         if self._siren is not None and not self._siren.available:
             text += "\nSirena no disponible (revisa el journal)"
+        if links and self._cameras.configured:
+            text += "\nCámaras:"
+            for status in self._cameras.status():
+                text += f"\n  {status.camera}: {_link_state(status.online, status.since)}"
+        if links and self._starlink is not None:
+            text += f"\nAntena Starlink: {_link_state(self._starlink.online, self._starlink.down_at)}"
+        if links and self._sensors is not None and self._sensors.configured:
+            if self._sensors.online is False:
+                text += f"\nZ-Wave: {_link_state(False, self._sensors.down_at)}"
+            text += "\nSensores:"
+            for status in self._sensors.status():
+                text += f"\n  {status.sensor}: {_sensor_state(status)}"
         return text
 
     def _allowed_message(self, update: Update) -> Message | None:
@@ -393,7 +454,14 @@ class TelegramFrontend:
         if message is None:
             return
         # On success, the ModeChanged broadcast is the reply.
-        if not self._alarm.arm(self._who(update)):
+        try:
+            armed = self._alarm.arm(self._who(update))
+        except ArmingBlocked as blocked:
+            await _send_with_retry(lambda: message.reply_text(
+                f"No se puede armar: sensor abierto: {', '.join(blocked.sensors)}", reply_markup=REPLY_MARKUP
+            ))
+            return
+        if not armed:
             await _send_with_retry(lambda: message.reply_text(
                 "La alarma ya está armada.", reply_markup=REPLY_MARKUP
             ))
@@ -446,7 +514,7 @@ class TelegramFrontend:
             return
         if not self._cameras.configured:
             await _send_with_retry(lambda: message.reply_text(
-                "Configura las cámaras en cameras.yaml y CAMERA_USERNAME y "
+                "Configura las cámaras en config.yaml y CAMERA_USERNAME y "
                 "CAMERA_PASSWORD en .env, y reinicia Rancho."
             ))
             return

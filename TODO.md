@@ -1,25 +1,25 @@
 
 
 
-patio alerts for animals
+window sensors:
 
-can set settings
+kitchen window
+living room window
+window with the cable coming through
 
 
 
 
 
-connect the indoor camera
-put the memory card in the indoor camera
-apply camera config so the indoor one works
+
+
+
+
 
 
 
 
 test failover to hologram sim after power cut
-
-
-
 
 
 test satelite disconnect
@@ -28,17 +28,8 @@ test satelite disconnect
 
 
 
-
-/estado should list cameras and show which is online
-
-z-wave board works
-
-window sensors: kitchen window, living room window, window with the cable coming through
-
-
-
-
-
+connect the indoor camera
+put the memory card in the indoor camera
 
 invite Horacio to the chat
 

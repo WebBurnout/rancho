@@ -30,7 +30,7 @@ Thieves have stolen copper pipes and the water pump. Our power can be cut from o
   3.3V (pin 17) -> 220 ohm -> node -> 1k ohm -> GPIO23 (pin 16); node -> relay contact -> GND (pin 20).
   Contact closed (power present) = GPIO reads 0. Contact open or wire cut = reads 1 (power out).
 - Siren: 12V 15W siren switched by a relay module on GPIO25 (pin 22). Input polarity (active-high or active-low) must be configurable. The siren must stay OFF during boot, at service start and stop, and if the service crashes.
-- Cameras: 3x Reolink RLC-520A PoE at 10.10.0.10, 10.10.0.11, 10.10.0.12, plus Cocina, a Reolink E1 (indoor, on Ethernet, no HTTP API) at 10.10.0.13. Names and addresses are in cameras.yaml. They have internet access (the Reolink app reaches them remotely through Reolink's servers); they record to their own SD cards.
+- Cameras: 3x Reolink RLC-520A PoE at 10.10.0.10, 10.10.0.11, 10.10.0.12, plus Cocina, a Reolink E1 (indoor, on Ethernet, no HTTP API) at 10.10.0.13. Names and addresses are in config.yaml. They have internet access (the Reolink app reaches them remotely through Reolink's servers); they record to their own SD cards.
 - Pi, router, Telcel modem, PoE switch and cameras are on a UPS. Starlink is not.
 
 ## Network

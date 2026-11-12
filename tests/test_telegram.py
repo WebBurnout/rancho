@@ -10,12 +10,14 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, NetworkError
 
-from rancho.core.cameras import Snapshot
+from rancho.core.cameras import CameraStatus, Snapshot
 from rancho.core.config import Config
 from rancho.core.events import (
     CameraOffline, CameraOnline, EventBus, Intrusion, ModeChanged, PersonPhoto, PowerLost, PowerRestored,
-    Sighting, StarlinkOffline, StarlinkOnline,
+    SensorHeard, SensorIntrusion, SensorSilent, SensorTamper, Sighting, StarlinkOffline, StarlinkOnline,
+    ZwaveOffline, ZwaveOnline,
 )
+from rancho.core.sensors import SensorStatus
 from rancho.core.state import Alarm, AlarmMode
 from rancho.frontends.telegram import HELP_TEXT, TelegramFrontend
 
@@ -247,6 +249,25 @@ class PowerAlertTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.send_message.call_args.args,
                          (-123, "Antena Starlink conectada de nuevo (sin conexión 10 min)"))
 
+    async def test_sensor_alerts(self) -> None:
+        cases = [
+            (SensorIntrusion(sensor="Cocina"), "Sensor abierto: Cocina\nSirena activada"),
+            (SensorTamper(sensor="Cocina"), "Tapa del sensor quitada: Cocina"),
+            (SensorSilent(sensor="Cocina", since=self.since),
+             "Sensor sin señal desde las 21:05: Cocina. Revisa la batería o si está emparejado."),
+            (SensorSilent(sensor="Cocina", since=None),
+             "Sensor sin señal: Cocina. Revisa la batería o si está emparejado."),
+            (SensorHeard(sensor="Cocina", silent_seconds=9 * 3600),
+             "Sensor con señal de nuevo: Cocina (sin señal 9 h 0 min)"),
+            (ZwaveOffline(since=self.since),
+             "Z-Wave sin conexión desde las 21:05: los sensores no funcionan. Revisa zwave.service."),
+            (ZwaveOnline(down_seconds=120), "Z-Wave conectado de nuevo (sin conexión 2 min)"),
+        ]
+        for event, text in cases:
+            with self.subTest(event.name):
+                await self.frontend._handle_event(self.bot, event)
+                self.assertEqual(self.bot.send_message.call_args.args, (-123, text))
+
     async def test_power_restored_reports_duration(self) -> None:
         await self.frontend._handle_event(self.bot, PowerRestored(down_seconds=600))
         self.assertEqual(self.bot.send_message.call_args.args, (-123, "Volvió la luz (sin luz 10 min)"))
@@ -260,8 +281,10 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
             telegram_bot_token="test-token", telegram_allowed_chat_ids=frozenset({-123}),
         )
         self.bus = EventBus()
-        self.alarm = Alarm(config.state_file, self.bus)
-        self.frontend = TelegramFrontend(config, self.bus, Mock(), self.alarm)
+        self.open: list[str] = []
+        self.alarm = Alarm(config.state_file, self.bus, open_sensors=lambda: self.open)
+        self.cameras = Mock(configured=False)
+        self.frontend = TelegramFrontend(config, self.bus, self.cameras, self.alarm)
         self.message = SimpleNamespace(reply_text=AsyncMock())
         self.bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
 
@@ -292,6 +315,12 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
         await self.frontend._arm(self.update(), None)
         self.assertIn("ya está armada", self.message.reply_text.call_args.args[0])
 
+    async def test_arm_with_open_sensor_is_refused(self) -> None:
+        self.open = ["Cocina"]
+        await self.frontend._arm(self.update(), None)
+        self.assertEqual(self.alarm.mode, AlarmMode.DISARMED)
+        self.assertEqual(self.message.reply_text.call_args.args[0], "No se puede armar: sensor abierto: Cocina")
+
     async def test_disarm_when_disarmed_says_so(self) -> None:
         await self.frontend._disarm(self.update(), None)
         self.assertIn("ya está desarmada", self.message.reply_text.call_args.args[0])
@@ -316,8 +345,44 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
         self.frontend._power = SimpleNamespace(available=True, present=True, off_at=None)
         self.frontend._siren = SimpleNamespace(available=True)
         self.assertTrue(self.frontend._status_text().endswith("\nLuz: normal"))
-        self.frontend._starlink = SimpleNamespace(online=False)
-        self.assertTrue(self.frontend._status_text().endswith("\nAntena Starlink: sin conexión"))
+        self.frontend._starlink = SimpleNamespace(online=False, down_at=datetime(2026, 11, 10, 21, 7))
+        self.assertTrue(self.frontend._status_text().endswith("\nAntena Starlink: sin conexión desde las 21:07"))
+        self.frontend._starlink = SimpleNamespace(online=None, down_at=None)
+        self.assertTrue(self.frontend._status_text().endswith("\nAntena Starlink: comprobando…"))
+        self.frontend._starlink = SimpleNamespace(online=True, down_at=None)
+        self.assertTrue(self.frontend._status_text().endswith("\nAntena Starlink: conectada"))
+
+    async def test_status_lists_cameras(self) -> None:
+        self.cameras.configured = True
+        self.cameras.status.return_value = [
+            CameraStatus("Patio", True),
+            CameraStatus("Bomba", False, datetime(2026, 11, 10, 21, 5)),
+            CameraStatus("Cocina", None),
+        ]
+        self.frontend._starlink = SimpleNamespace(online=True, down_at=None)
+        text = self.frontend._status_text()
+        self.assertTrue(text.endswith(
+            "\nCámaras:\n  Patio: conectada\n  Bomba: sin conexión desde las 21:05\n  Cocina: comprobando…"
+            "\nAntena Starlink: conectada"
+        ))
+        text = self.frontend._status_text(links=False)
+        self.assertNotIn("Cámaras", text)
+        self.assertNotIn("Starlink", text)
+
+    async def test_status_lists_sensors(self) -> None:
+        self.frontend._sensors = SimpleNamespace(configured=True, online=True, status=lambda: [
+            SensorStatus("Cocina", False, False, 99, False, None),
+            SensorStatus("Sala", True, True, None, True, datetime(2026, 11, 10, 3, 4)),
+            SensorStatus("Baño", None, False, None, False, None),
+        ])
+        self.assertTrue(self.frontend._status_text().endswith(
+            "\nSensores:\n  Cocina: cerrado, batería 99%"
+            "\n  Sala: abierto, tapa quitada, sin señal desde las 03:04\n  Baño: comprobando…"
+        ))
+        self.frontend._sensors.online = False
+        self.frontend._sensors.down_at = datetime(2026, 11, 10, 21, 5)
+        self.assertIn("\nZ-Wave: sin conexión desde las 21:05\nSensores:", self.frontend._status_text())
+        self.assertNotIn("Sensores", self.frontend._status_text(links=False))
 
     async def test_sleep_broadcasts_and_shows_in_status(self) -> None:
         await self.frontend._pause(self.update(), self.context("1"))

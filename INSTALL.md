@@ -119,10 +119,10 @@ oriented as Zooz's sheet shows. Boot, then:
 2. In `/boot/firmware/cmdline.txt`, remove `console=serial0,115200 `. The file
    must stay a single line.
 
-3. Disable the Bluetooth UART service and reboot:
+3. Disable Bluetooth, which has no adapter after `disable-bt`, and reboot:
 
    ```sh
-   sudo systemctl disable hciuart
+   sudo systemctl disable bluetooth
    sudo reboot
    ```
 
@@ -153,6 +153,69 @@ Expect `06` (ACK) followed by a frame starting `01 .. 01 15` that contains the
 text `Z-Wave` and a version number. No output means the board isn't answering.
 Check that it is seated, that `/dev/serial0` points at `ttyAMA0` (not
 `ttyS0`), and that nothing else has the port open (`sudo fuser /dev/serial0`).
+
+## 8. Z-Wave JS server
+
+[Z-Wave JS Server](https://github.com/zwave-js/zwave-js-server) owns the
+serial port and serves the Z-Wave network as a WebSocket on `127.0.0.1:3000`;
+Rancho will be its client. It runs as its own unit, `deploy/zwave.service`,
+with versions pinned in `zwave/package.json` and options in `zwave/config.cjs`.
+It uses Debian's Node.js (20), not nvm's, so updating nvm can't break it.
+
+Install Node.js and the server:
+
+```sh
+sudo apt install -y nodejs npm
+/usr/bin/node --version
+cd /home/tim/rancho/zwave
+/usr/bin/npm install
+mkdir -p cache
+```
+
+Expect `v20.x`, and npm creating `node_modules/` and `package-lock.json`
+(commit the lockfile; later installs use `/usr/bin/npm ci`). nvm's npm comes
+first on PATH, hence the full path. `cache/` holds the network state and must
+exist before the service starts.
+
+Generate the six network keys:
+
+```sh
+for k in S0_LEGACY S2_UNAUTHENTICATED S2_AUTHENTICATED S2_ACCESS_CONTROL LR_S2_AUTHENTICATED LR_S2_ACCESS_CONTROL; do
+  echo "ZWAVE_$k=$(openssl rand -hex 16)"
+done
+```
+
+Add the printed lines to `/home/tim/rancho/.env` (see `.env.example`), and
+save a copy off the Pi, for example in a password manager. Without the keys,
+every secure device has to be excluded and paired again. Never change them
+once devices are paired.
+
+Link and start the service:
+
+```sh
+sudo ln -sfn /home/tim/rancho/deploy/zwave.service /etc/systemd/system/zwave.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now zwave.service
+sudo systemctl status zwave.service --no-pager
+sudo journalctl -u zwave.service -n 50 --no-pager
+```
+
+Expect `active (running)`, the controller's details (home ID, firmware,
+`USA (Long Range)` region), then `driver ready - starting server` and the
+server listening on `127.0.0.1:3000`. A key error names the missing `.env`
+entry. `failed starting driver` means the serial port: repeat the checks in
+section 7.
+
+Check that the server answers:
+
+```sh
+cd /home/tim/rancho/zwave
+timeout 5 /usr/bin/node node_modules/.bin/zwave-client --dump | head -c 600; echo
+```
+
+Expect a `version` message with the driver and server versions, then a
+`result` with the network state: one node (the controller, node 1) until
+sensors are paired.
 
 ## Homelab sentinel
 

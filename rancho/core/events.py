@@ -66,7 +66,7 @@ class Intrusion(Event):
 
 @dataclass(frozen=True, kw_only=True)
 class SirenTriggered(Event):
-    camera: str
+    source: str  # the camera or sensor
     seconds: float
     name: str = field(default="siren_triggered", init=False)
 
@@ -119,6 +119,69 @@ class StarlinkOnline(Event):
 
     down_seconds: float
     name: str = field(default="starlink_online", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SensorOpened(Event):
+    """A door/window sensor went from closed to open."""
+
+    sensor: str
+    name: str = field(default="sensor_opened", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SensorClosed(Event):
+    sensor: str
+    name: str = field(default="sensor_closed", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SensorIntrusion(Event):
+    """A sensor opened while armed; the siren sounds."""
+
+    sensor: str
+    name: str = field(default="sensor_intrusion", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SensorTamper(Event):
+    """A sensor's cover was removed; published whether armed or not."""
+
+    sensor: str
+    name: str = field(default="sensor_tamper", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SensorSilent(Event):
+    """A sensor missed its wake-ups; published once until it is heard again."""
+
+    sensor: str
+    # When it was last heard; None if never since Rancho started.
+    since: datetime | None
+    name: str = field(default="sensor_silent", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SensorHeard(Event):
+    """A sensor reported as silent was heard again."""
+
+    sensor: str
+    silent_seconds: float
+    name: str = field(default="sensor_heard", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ZwaveOffline(Event):
+    """zwave.service has been unreachable for OFFLINE_AFTER; sensors are blind."""
+
+    since: datetime
+    name: str = field(default="zwave_offline", init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ZwaveOnline(Event):
+    down_seconds: float
+    name: str = field(default="zwave_online", init=False)
 
 
 @dataclass(frozen=True, kw_only=True)

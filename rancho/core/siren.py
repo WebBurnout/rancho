@@ -44,7 +44,7 @@ class SirenControl:
                     self.off()
                     continue
                 if isinstance(event, SirenTriggered):
-                    self.sound(event.seconds, event.camera)
+                    self.sound(event.seconds, event.source)
                 elif isinstance(event, ModeChanged) and event.mode == "disarmed":
                     self.off()
         finally:
@@ -56,16 +56,16 @@ class SirenControl:
                 self._siren.close()
                 logger.info("Siren released (off)")
 
-    def sound(self, seconds: float, camera: str) -> None:
+    def sound(self, seconds: float, source: str) -> None:
         if not self.available:
-            logger.warning("Siren unavailable; not sounding for %s", camera)
+            logger.warning("Siren unavailable; not sounding for %s", source)
             return
         # A new trigger while sounding restarts the timer rather than stacking.
         self._off_at = self._clock() + seconds
         if not self.on:
             self._siren.set(True)
             self.on = True
-        logger.warning("Siren on for %gs (%s)", seconds, camera)
+        logger.warning("Siren on for %gs (%s)", seconds, source)
 
     def off(self) -> None:
         self._off_at = None

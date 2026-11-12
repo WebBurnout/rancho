@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
-from rancho.core.cameras import OFFLINE_AFTER, Cameras, Snapshot, _Camera
+from rancho.core.cameras import OFFLINE_AFTER, Cameras, CameraStatus, Snapshot, _Camera
 from rancho.core.config import CameraConfig, Config
 from rancho.core.events import (
     CameraOffline, CameraOnline, EventBus, ObjectDetected, PersonCleared, PersonDetected,
@@ -206,6 +206,14 @@ class HealthTests(IsolatedAsyncioTestCase):
             self.camera._check_health(online, now)
         names = [self.queue.get_nowait().name for _ in range(self.queue.qsize())]
         self.assertEqual(names, ["camera_offline", "camera_online", "camera_offline"])
+
+    async def test_status_follows_health_checks(self) -> None:
+        self.assertIsNone(self.camera.status.online)
+        self.camera._check_health(False, 0)
+        self.assertFalse(self.camera.status.online)
+        self.assertIsNotNone(self.camera.status.since)
+        self.camera._check_health(True, 10)
+        self.assertEqual(self.camera.status, CameraStatus("Bomba", True))
 
     async def test_not_ready_skips_probe_and_counts_as_down(self) -> None:
         self.camera._reachable = AsyncMock(return_value=True)

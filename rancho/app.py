@@ -11,6 +11,7 @@ from rancho.core.hardware import GpioPowerSensor, GpioSiren
 from rancho.core.photos import PhotoArchive
 from rancho.core.power import PowerMonitor
 from rancho.core.recorder import Recorder
+from rancho.core.sensors import Sensors
 from rancho.core.siren import SirenControl
 from rancho.core.starlink import StarlinkMonitor
 from rancho.core.state import Alarm
@@ -32,13 +33,14 @@ async def run(config: Config) -> None:
     power = PowerMonitor(events, GpioPowerSensor())
     power.open()
     starlink = StarlinkMonitor(events, power)
-    alarm = Alarm(config.state_file, events)
+    sensors = Sensors(config, events)
+    alarm = Alarm(config.state_file, events, open_sensors=sensors.open_sensors)
     alarm.load()
     archive = PhotoArchive(config.state_file.parent / "photos")
     archive.load()
     cameras = Cameras(config, events, archive)
     recorder = Recorder(events, cameras, alarm)
-    telegram = TelegramFrontend(config, events, cameras, alarm, siren, power, starlink)
+    telegram = TelegramFrontend(config, events, cameras, alarm, siren, power, starlink, sensors)
     workers = {
         asyncio.create_task(siren.run(), name="siren"),
         asyncio.create_task(power.run(), name="power"),
@@ -46,6 +48,7 @@ async def run(config: Config) -> None:
         asyncio.create_task(alarm.run(), name="alarm"),
         asyncio.create_task(telegram.run(), name="telegram"),
         asyncio.create_task(cameras.run(), name="cameras"),
+        asyncio.create_task(sensors.run(), name="sensors"),
         asyncio.create_task(recorder.run(), name="recorder"),
     }
     stop_task = asyncio.create_task(stop.wait(), name="shutdown")

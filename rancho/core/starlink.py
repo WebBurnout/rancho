@@ -60,6 +60,11 @@ class StarlinkMonitor:
         # Monotonic time mains was last seen returning; None while it is off.
         self._mains_since: float | None = float("-inf")
 
+    @property
+    def down_at(self) -> datetime | None:
+        # Wall-clock start of the current outage, while offline.
+        return self._down_at
+
     async def run(self) -> None:
         while True:
             self._check(await self._reachable(), self._clock())

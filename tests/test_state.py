@@ -7,11 +7,12 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 
 from rancho.core.events import (
-    EventBus, Intrusion, ModeChanged, ObjectDetected, PersonDetected, SirenTriggered, Sighting,
+    EventBus, Intrusion, ModeChanged, ObjectDetected, PersonDetected, SensorIntrusion, SensorOpened,
+    SirenTriggered, Sighting,
 )
 from rancho.core.state import (
     CONFIRM_WINDOW, INTRUSION_COOLDOWN, MAX_SLEEP_HOURS, SIGHTING_COOLDOWN, SIREN_COOLDOWN, SIREN_SECONDS,
-    Alarm, AlarmMode,
+    Alarm, AlarmMode, ArmingBlocked,
 )
 
 NOON = datetime(2026, 11, 11, 12, 0)
@@ -26,13 +27,17 @@ class AlarmTests(IsolatedAsyncioTestCase):
         self.events = self.bus.subscribe()
         self.now = 1000.0
         self.local = NOON
+        self.open: list[str] = []
         self.alarm = self.new_alarm()
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
     def new_alarm(self) -> Alarm:
-        return Alarm(self.path, self.bus, clock=lambda: self.now, local_now=lambda: self.local)
+        return Alarm(
+            self.path, self.bus, clock=lambda: self.now, local_now=lambda: self.local,
+            open_sensors=lambda: list(self.open),
+        )
 
     def drain(self) -> list:
         events = []
@@ -127,7 +132,7 @@ class AlarmTests(IsolatedAsyncioTestCase):
         events = self.person()
         self.assertEqual(events, [
             Intrusion(camera="Patio", siren=True, occurred_at=events[0].occurred_at),
-            SirenTriggered(camera="Patio", seconds=SIREN_SECONDS, occurred_at=events[1].occurred_at),
+            SirenTriggered(source="Patio", seconds=SIREN_SECONDS, occurred_at=events[1].occurred_at),
         ])
 
     async def test_siren_cooldown_is_global(self) -> None:
@@ -228,3 +233,39 @@ class AlarmTests(IsolatedAsyncioTestCase):
         self.arm()
         self.assertEqual(json.loads(self.path.read_text())["mode"], "armed")
         self.assertEqual([p.name for p in Path(self.tmp.name).iterdir()], ["state.json"])
+
+    async def test_arming_is_refused_while_a_sensor_is_open(self) -> None:
+        self.open = ["Cocina", "Sala"]
+        with self.assertRaises(ArmingBlocked) as blocked:
+            self.alarm.arm("Tim")
+        self.assertEqual(blocked.exception.sensors, ["Cocina", "Sala"])
+        self.assertEqual(self.alarm.mode, AlarmMode.DISARMED)
+        self.assertEqual(self.drain(), [])
+        self.assertFalse(self.path.exists())
+        self.open = []
+        self.assertTrue(self.alarm.arm("Tim"))
+
+    async def test_already_armed_wins_over_open_sensor(self) -> None:
+        self.arm()
+        self.open = ["Cocina"]
+        self.assertFalse(self.alarm.arm("Tim"))
+
+    async def test_sensor_opening_while_armed_sounds_siren(self) -> None:
+        self.local = MIDNIGHT
+        self.arm()
+        for _ in range(2):
+            self.alarm._on_sensor(SensorOpened(sensor="Cocina"))
+            events = self.drain()
+            # No night confirmation or cooldown for sensors.
+            self.assertEqual(events, [
+                SensorIntrusion(sensor="Cocina", occurred_at=events[0].occurred_at),
+                SirenTriggered(source="Cocina", seconds=SIREN_SECONDS, occurred_at=events[1].occurred_at),
+            ])
+
+    async def test_sensor_opening_is_ignored_when_disarmed_or_asleep(self) -> None:
+        self.alarm._on_sensor(SensorOpened(sensor="Cocina"))
+        self.assertEqual(self.drain(), [])
+        self.arm()
+        self.alarm.sleep(1, "Tim")
+        self.alarm._on_sensor(SensorOpened(sensor="Cocina"))
+        self.assertEqual(self.drain(), [])
