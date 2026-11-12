@@ -135,12 +135,12 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         self.cameras.capture.assert_awaited_once_with("Patio")
         args, kwargs = self.bot.send_photo.call_args
         self.assertEqual(args, (-123, b"jpeg"))
-        self.assertEqual(kwargs["caption"], "Persona detectada: Patio")
+        self.assertEqual(kwargs["caption"], "⚠️ Persona detectada: Patio")
 
     async def test_caption_says_whether_siren_sounded(self) -> None:
         self.cameras.capture.return_value = Snapshot("Patio", image=b"jpeg")
         await self.handle(Intrusion(camera="Patio", siren=True))
-        self.assertEqual(self.bot.send_photo.call_args.kwargs["caption"], "Persona detectada: Patio\nSirena activada")
+        self.assertEqual(self.bot.send_photo.call_args.kwargs["caption"], "🚨 Persona detectada: Patio\nSirena activada")
         await self.handle(Intrusion(camera="Patio", unconfirmed=True))
         self.assertIn("De noche la sirena", self.bot.send_photo.call_args.kwargs["caption"])
 
@@ -148,13 +148,13 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         self.cameras.capture.return_value = Snapshot("Bomba", image=b"jpeg")
         await self.handle(Sighting(camera="Bomba", kind="animal"))
         self.cameras.capture.assert_awaited_once_with("Bomba")
-        self.assertEqual(self.bot.send_photo.call_args.kwargs["caption"], "Animal detectado: Bomba")
+        self.assertEqual(self.bot.send_photo.call_args.kwargs["caption"], "⚠️ Animal detectado: Bomba")
 
     async def test_follow_up_photo_is_sent_with_elapsed_time(self) -> None:
         await self.handle(PersonPhoto(camera="Patio", image=b"jpeg", seconds=20))
         args, kwargs = self.bot.send_photo.call_args
         self.assertEqual(args, (-123, b"jpeg"))
-        self.assertEqual(kwargs["caption"], "Patio: persona aún detectada (20 s)")
+        self.assertEqual(kwargs["caption"], "⚠️ Patio: persona aún detectada (20 s)")
         self.cameras.capture.assert_not_awaited()
 
     async def test_failed_snapshot_still_alerts(self) -> None:
@@ -162,7 +162,7 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         await self.handle(Intrusion(camera="Patio"))
         self.bot.send_photo.assert_not_awaited()
         text = self.bot.send_message.call_args.args[1]
-        self.assertIn("Persona detectada: Patio", text)
+        self.assertIn("⚠️ Persona detectada: Patio", text)
         self.assertIn("aún no conectada", text)
 
     async def test_alert_retries_through_failover(self) -> None:
@@ -181,12 +181,12 @@ class IntrusionAlertTests(IsolatedAsyncioTestCase):
         since = datetime(2026, 11, 10, 15, 16)
         await self.frontend._handle_event(self.bot, CameraOffline(camera="Cocina", since=since))
         self.assertEqual(self.bot.send_message.call_args.args,
-                         (-123, "Cámara sin conexión: Cocina (desde las 15:16)"))
+                         (-123, "⚠️ Cámara sin conexión: Cocina (desde las 15:16)"))
 
     async def test_camera_online_reports_duration(self) -> None:
         await self.frontend._handle_event(self.bot, CameraOnline(camera="Cocina", down_seconds=3900))
         self.assertEqual(self.bot.send_message.call_args.args,
-                         (-123, "Cámara reconectada: Cocina (sin conexión 1 h 5 min)"))
+                         (-123, "✅ Cámara reconectada: Cocina (sin conexión 1 h 5 min)"))
 
 
 class PowerAlertTests(IsolatedAsyncioTestCase):
@@ -205,7 +205,7 @@ class PowerAlertTests(IsolatedAsyncioTestCase):
             Snapshot("Patio", image=b"one"), Snapshot("Bomba", error="offline"), Snapshot("Puerta", image=b"two"),
         ]
         await self.frontend._handle_event(self.bot, PowerLost(since=self.since))
-        self.assertEqual(self.bot.send_message.call_args.args, (-123, "Corte de luz desde las 21:05"))
+        self.assertEqual(self.bot.send_message.call_args.args, (-123, "⚠️ Corte de luz desde las 21:05"))
         self.cameras.capture_all.assert_not_awaited()
         await asyncio.gather(*self.frontend._uploads)
         args, kwargs = self.bot.send_media_group.call_args
@@ -217,7 +217,7 @@ class PowerAlertTests(IsolatedAsyncioTestCase):
         self.cameras.configured = False
         await self.frontend._handle_event(self.bot, PowerLost(since=self.since))
         await asyncio.gather(*self.frontend._uploads)
-        self.assertEqual(self.bot.send_message.call_args.args, (-123, "Corte de luz desde las 21:05"))
+        self.assertEqual(self.bot.send_message.call_args.args, (-123, "⚠️ Corte de luz desde las 21:05"))
         self.bot.send_media_group.assert_not_awaited()
 
     async def test_hung_send_is_cut_off_and_retried(self) -> None:
@@ -245,24 +245,24 @@ class PowerAlertTests(IsolatedAsyncioTestCase):
     async def test_starlink_alerts(self) -> None:
         await self.frontend._handle_event(self.bot, StarlinkOffline(since=self.since))
         self.assertTrue(self.bot.send_message.call_args.args[1].startswith(
-            "Antena Starlink sin conexión desde las 21:05"))
+            "⚠️ Antena Starlink sin conexión desde las 21:05"))
         await self.frontend._handle_event(self.bot, StarlinkOnline(down_seconds=600))
         self.assertEqual(self.bot.send_message.call_args.args,
-                         (-123, "Antena Starlink conectada de nuevo (sin conexión 10 min)"))
+                         (-123, "✅ Antena Starlink conectada de nuevo (sin conexión 10 min)"))
 
     async def test_sensor_alerts(self) -> None:
         cases = [
-            (SensorIntrusion(sensor="Cocina"), "Sensor abierto: Cocina\nSirena activada"),
-            (SensorTamper(sensor="Cocina"), "Tapa del sensor quitada: Cocina"),
+            (SensorIntrusion(sensor="Cocina"), "🚨 Sensor abierto: Cocina\nSirena activada"),
+            (SensorTamper(sensor="Cocina"), "⚠️ Tapa del sensor quitada: Cocina"),
             (SensorSilent(sensor="Cocina", since=self.since),
-             "Sensor sin señal desde las 21:05: Cocina. Revisa la batería o si está emparejado."),
+             "⚠️ Sensor sin señal desde las 21:05: Cocina. Revisa la batería o si está emparejado."),
             (SensorSilent(sensor="Cocina", since=None),
-             "Sensor sin señal: Cocina. Revisa la batería o si está emparejado."),
+             "⚠️ Sensor sin señal: Cocina. Revisa la batería o si está emparejado."),
             (SensorHeard(sensor="Cocina", silent_seconds=9 * 3600),
-             "Sensor con señal de nuevo: Cocina (sin señal 9 h 0 min)"),
+             "✅ Sensor con señal de nuevo: Cocina (sin señal 9 h 0 min)"),
             (ZwaveOffline(since=self.since),
-             "Z-Wave sin conexión desde las 21:05: los sensores no funcionan. Revisa zwave.service."),
-            (ZwaveOnline(down_seconds=120), "Z-Wave conectado de nuevo (sin conexión 2 min)"),
+             "⚠️ Z-Wave sin conexión desde las 21:05: los sensores no funcionan. Revisa zwave.service."),
+            (ZwaveOnline(down_seconds=120), "✅ Z-Wave conectado de nuevo (sin conexión 2 min)"),
         ]
         for event, text in cases:
             with self.subTest(event.name):
@@ -271,7 +271,7 @@ class PowerAlertTests(IsolatedAsyncioTestCase):
 
     async def test_power_restored_reports_duration(self) -> None:
         await self.frontend._handle_event(self.bot, PowerRestored(down_seconds=600))
-        self.assertEqual(self.bot.send_message.call_args.args, (-123, "Volvió la luz (sin luz 10 min)"))
+        self.assertEqual(self.bot.send_message.call_args.args, (-123, "✅ Volvió la luz (sin luz 10 min)"))
 
 
 class AlarmCommandTests(IsolatedAsyncioTestCase):

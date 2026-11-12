@@ -48,6 +48,10 @@ KEYBOARD = InlineKeyboardMarkup([
 # Set to KEYBOARD to attach the buttons to every message again.
 REPLY_MARKUP: InlineKeyboardMarkup | None = None
 SIGHTING_TEXT = {"animal": "Animal detectado", "vehicle": "Vehículo detectado"}
+# Alert prefixes: the siren sounded, something needs a look, back to normal.
+SIREN = "🚨"
+WARNING = "⚠️"
+OK = "✅"
 # Telegram stores ordinary photos at most 1280 px on the long side, so anything
 # bigger only costs SIM data. Full resolution stays in photos/ on the Pi.
 TELEGRAM_MAX_SIDE = 1280
@@ -270,53 +274,54 @@ class TelegramFrontend:
                 await self._broadcast(bot, self._mode_changed_text(event), event.name)
             elif isinstance(event, CameraOffline):
                 await self._broadcast(
-                    bot, f"Cámara sin conexión: {event.camera} (desde las {event.since:%H:%M})", event.name
+                    bot, f"{WARNING} Cámara sin conexión: {event.camera} (desde las {event.since:%H:%M})",
+                    event.name,
                 )
             elif isinstance(event, CameraOnline):
                 await self._broadcast(
-                    bot, f"Cámara reconectada: {event.camera} (sin conexión {_duration(event.down_seconds)})",
+                    bot, f"{OK} Cámara reconectada: {event.camera} (sin conexión {_duration(event.down_seconds)})",
                     event.name,
                 )
             elif isinstance(event, PowerLost):
-                await self._broadcast(bot, f"Corte de luz desde las {event.since:%H:%M}", event.name)
+                await self._broadcast(bot, f"{WARNING} Corte de luz desde las {event.since:%H:%M}", event.name)
                 self._upload(event.name, self._power_photos(bot, event))
             elif isinstance(event, StarlinkOffline):
                 await self._broadcast(
-                    bot, f"Antena Starlink sin conexión desde las {event.since:%H:%M}, con luz. "
+                    bot, f"{WARNING} Antena Starlink sin conexión desde las {event.since:%H:%M}, con luz. "
                     "Revisa el cable de la antena.", event.name,
                 )
             elif isinstance(event, StarlinkOnline):
                 await self._broadcast(
-                    bot, f"Antena Starlink conectada de nuevo (sin conexión {_duration(event.down_seconds)})",
+                    bot, f"{OK} Antena Starlink conectada de nuevo (sin conexión {_duration(event.down_seconds)})",
                     event.name,
                 )
             elif isinstance(event, PowerRestored):
                 await self._broadcast(
-                    bot, f"Volvió la luz (sin luz {_duration(event.down_seconds)})", event.name
+                    bot, f"{OK} Volvió la luz (sin luz {_duration(event.down_seconds)})", event.name
                 )
             elif isinstance(event, SensorIntrusion):
-                await self._broadcast(bot, f"Sensor abierto: {event.sensor}\nSirena activada", event.name)
+                await self._broadcast(bot, f"{SIREN} Sensor abierto: {event.sensor}\nSirena activada", event.name)
             elif isinstance(event, SensorTamper):
-                await self._broadcast(bot, f"Tapa del sensor quitada: {event.sensor}", event.name)
+                await self._broadcast(bot, f"{WARNING} Tapa del sensor quitada: {event.sensor}", event.name)
             elif isinstance(event, SensorSilent):
                 since = f" desde las {event.since:%H:%M}" if event.since else ""
                 await self._broadcast(
-                    bot, f"Sensor sin señal{since}: {event.sensor}. Revisa la batería o si está emparejado.",
-                    event.name,
+                    bot, f"{WARNING} Sensor sin señal{since}: {event.sensor}. "
+                    "Revisa la batería o si está emparejado.", event.name,
                 )
             elif isinstance(event, SensorHeard):
                 await self._broadcast(
-                    bot, f"Sensor con señal de nuevo: {event.sensor} (sin señal {_duration(event.silent_seconds)})",
-                    event.name,
+                    bot, f"{OK} Sensor con señal de nuevo: {event.sensor} "
+                    f"(sin señal {_duration(event.silent_seconds)})", event.name,
                 )
             elif isinstance(event, ZwaveOffline):
                 await self._broadcast(
-                    bot, f"Z-Wave sin conexión desde las {event.since:%H:%M}: los sensores no funcionan. "
+                    bot, f"{WARNING} Z-Wave sin conexión desde las {event.since:%H:%M}: los sensores no funcionan. "
                     "Revisa zwave.service.", event.name,
                 )
             elif isinstance(event, ZwaveOnline):
                 await self._broadcast(
-                    bot, f"Z-Wave conectado de nuevo (sin conexión {_duration(event.down_seconds)})", event.name
+                    bot, f"{OK} Z-Wave conectado de nuevo (sin conexión {_duration(event.down_seconds)})", event.name
                 )
         except Exception as exc:
             logger.warning("Alert for %s failed (%s)", event.name, type(exc).__name__)
@@ -334,7 +339,7 @@ class TelegramFrontend:
 
     async def _alert_intrusion(self, bot: Bot, event: Intrusion) -> None:
         snapshot = await self._cameras.capture(event.camera)
-        text = f"Persona detectada: {event.camera}"
+        text = f"{SIREN if event.siren else WARNING} Persona detectada: {event.camera}"
         if event.siren:
             text += "\nSirena activada"
         elif event.unconfirmed:
@@ -350,7 +355,7 @@ class TelegramFrontend:
             ), f"{event.name} photo", PHOTO_ATTEMPT_TIMEOUT)
 
     async def _alert_sighting(self, bot: Bot, event: Sighting) -> None:
-        text = f"{SIGHTING_TEXT.get(event.kind, event.kind)}: {event.camera}"
+        text = f"{WARNING} {SIGHTING_TEXT.get(event.kind, event.kind)}: {event.camera}"
         snapshot = await self._cameras.capture(event.camera)
         if snapshot.image is None:
             await self._broadcast(bot, f"{text}\nNo se pudo tomar la foto: {snapshot.error}", event.name)
@@ -364,7 +369,7 @@ class TelegramFrontend:
 
     async def _follow_up(self, bot: Bot, event: PersonPhoto) -> None:
         image = await _for_telegram(event.image)
-        text = f"{event.camera}: persona aún detectada ({event.seconds} s)"
+        text = f"{WARNING} {event.camera}: persona aún detectada ({event.seconds} s)"
         for chat_id in self._config.telegram_allowed_chat_ids:
             await _send_alert(lambda: bot.send_photo(
                 chat_id, image, caption=text, reply_markup=REPLY_MARKUP,
