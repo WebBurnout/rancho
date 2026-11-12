@@ -12,7 +12,7 @@ from datetime import datetime
 
 import aiohttp
 from zwave_js_server.client import Client
-from zwave_js_server.const import InclusionStrategy, NodeStatus, SecurityClass
+from zwave_js_server.const import InclusionStrategy, NodeStatus, RssiError, SecurityClass
 from zwave_js_server.exceptions import BaseZwaveJSServerError, CannotConnect, RssiErrorReceived
 from zwave_js_server.model.controller import Controller
 from zwave_js_server.model.controller.rebuild_routes import RebuildRoutesOptions, RebuildRoutesStatus
@@ -24,6 +24,7 @@ PAIRING_WINDOW = 60
 # A battery device stays awake for its interview right after joining.
 INTERVIEW_WAIT = 120
 BATTERY_CC = 128
+RSSI_ERRORS = {error.value for error in RssiError}
 
 
 class Events:
@@ -87,7 +88,15 @@ def route(node: Node) -> str | None:
         return None
     if not lwr.repeaters:
         return "route direct"
-    return "route via " + " > ".join(str(repeater.node_id) for repeater in lwr.repeaters)
+    # Each repeater's RSSI is of the ACK it heard from the next hop toward the node.
+    rssi = lwr.data.get("repeaterRSSI", [])
+    hops = []
+    for i, repeater in enumerate(lwr.repeaters):
+        hop = str(repeater.node_id)
+        if i < len(rssi) and rssi[i] not in RSSI_ERRORS:
+            hop += f" ({rssi[i]} dBm)"
+        hops.append(hop)
+    return "route via " + " > ".join(hops)
 
 
 def traffic(node: Node) -> str:

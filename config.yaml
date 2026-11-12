@@ -29,3 +29,19 @@ sensors:
     node: 5
   - name: Ventana starlink
     node: 6
+
+# Where the house is (Ecatzingo, Estado de México), for working out dusk.
+location:
+  latitude: 18.95
+  longitude: -98.75
+
+# Z-Wave relays switched on a schedule. `on_at`/`off_at` are "HH:MM" (quoted) or
+# dusk (civil twilight at `location`). Each time shifts randomly by up to
+# `jitter` minutes either way (default 30), picked fresh every night. Switching
+# the light by hand (or with /encender, /apagar) overrides the schedule until
+# its next on or off time. Nothing goes to Telegram; /estado shows each light.
+lights:
+  - name: Patio
+    node: 7
+    on_at: dusk
+    off_at: "03:00"

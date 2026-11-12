@@ -18,6 +18,7 @@ from rancho.core.events import (
     SensorHeard, SensorIntrusion, SensorSilent, SensorTamper, Sighting, StarlinkOffline, StarlinkOnline,
     ZwaveOffline, ZwaveOnline,
 )
+from rancho.core.lights import Lights, LightStatus
 from rancho.core.power import PowerMonitor
 from rancho.core.sensors import Sensors, SensorStatus
 from rancho.core.siren import SirenControl
@@ -34,6 +35,7 @@ HELP_TEXT = (
     "/estado — estado de la alarma, las cámaras y los sensores\n"
     "/foto — fotos de todas las cámaras\n"
     "/pausa 1 — pausa las alertas 1 hora (/pausa 0 las reactiva)\n"
+    "/encender, /apagar — las luces, hasta su próximo horario (o /encender patio)\n"
     "/ayuda — muestra esta lista"
 )
 # Buttons send the command name as callback data.
@@ -144,6 +146,18 @@ def _sensor_state(status: SensorStatus) -> str:
     return ", ".join(parts)
 
 
+def _light_state(status: LightStatus) -> str:
+    if not status.reachable:
+        return "sin respuesta"
+    if status.on is None:
+        return "comprobando…"
+    state = "encendida" if status.on else "apagada"
+    if status.manual:
+        return f"{state} a mano; el horario sigue a las {status.next_change:%H:%M}"
+    verb = "se apaga" if status.on else "se enciende"
+    return f"{state}, {verb} a las {status.next_change:%H:%M}"
+
+
 def _link_state(online: bool | None, since: datetime | None) -> str:
     if online is None:
         return "comprobando…"
@@ -165,6 +179,7 @@ class TelegramFrontend:
         power: PowerMonitor | None = None,
         starlink: StarlinkMonitor | None = None,
         sensors: Sensors | None = None,
+        lights: Lights | None = None,
     ) -> None:
         self._config = config
         self._events = events
@@ -175,6 +190,7 @@ class TelegramFrontend:
         self._power = power
         self._starlink = starlink
         self._sensors = sensors
+        self._lights = lights
         # The restart notice goes out once per process, not on every reconnect.
         self._announced = False
         # Photo uploads run beside the event loop, so a slow upload never delays
@@ -212,6 +228,8 @@ class TelegramFrontend:
         application.add_handler(CommandHandler("estado", self._status))
         application.add_handler(CommandHandler("foto", self._photo))
         application.add_handler(CommandHandler("pausa", self._pause))
+        application.add_handler(CommandHandler("encender", self._light_on))
+        application.add_handler(CommandHandler("apagar", self._light_off))
         application.add_handler(CommandHandler(["ayuda", "start"], self._help))
         application.add_handler(CallbackQueryHandler(self._button))
         application.add_error_handler(self._handle_error)
@@ -420,6 +438,10 @@ class TelegramFrontend:
             text += "\nSensores:"
             for status in self._sensors.status():
                 text += f"\n  {status.sensor}: {_sensor_state(status)}"
+        if links and self._lights is not None and self._lights.configured:
+            text += "\nLuces:"
+            for status in self._lights.status():
+                text += f"\n  {status.light}: {_light_state(status)}"
         return text
 
     def _allowed_message(self, update: Update) -> Message | None:
@@ -507,6 +529,38 @@ class TelegramFrontend:
         text = (f"Alertas reactivadas ({who})" if until is None
                 else f"Alertas en pausa hasta {until:%H:%M} ({who})")
         await self._broadcast(context.bot, text)
+
+    async def _light_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._switch_lights(update, context, True)
+
+    async def _light_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._switch_lights(update, context, False)
+
+    async def _switch_lights(self, update: Update, context: ContextTypes.DEFAULT_TYPE, on: bool) -> None:
+        message = self._allowed_message(update)
+        if message is None:
+            return
+        lights = self._lights
+        if lights is None or not lights.configured:
+            await _send_with_retry(lambda: message.reply_text(
+                "No hay luces en config.yaml.", reply_markup=REPLY_MARKUP
+            ))
+            return
+        # A name may have spaces; no name means every light.
+        asked = " ".join(context.args or [])
+        known = {name.casefold(): name for name in lights.names()}
+        if asked and asked.casefold() not in known:
+            await _send_with_retry(lambda: message.reply_text(
+                f"No hay una luz «{asked}». Luces: {', '.join(known.values())}", reply_markup=REPLY_MARKUP
+            ))
+            return
+        lines = []
+        for name in [known[asked.casefold()]] if asked else known.values():
+            if await lights.switch(name, on):
+                lines.append(f"{name}: {'encendida' if on else 'apagada'} hasta su próximo horario")
+            else:
+                lines.append(f"{name}: sin respuesta, no se pudo {'encender' if on else 'apagar'}")
+        await _send_with_retry(lambda: message.reply_text("\n".join(lines), reply_markup=REPLY_MARKUP))
 
     async def _photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = self._allowed_message(update)

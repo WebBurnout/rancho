@@ -8,7 +8,6 @@ open, close, are tampered with, or wake up on their interval.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 from collections.abc import Callable
@@ -16,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from rancho.core import zwave
 from rancho.core.config import Config, SensorConfig
 from rancho.core.events import (
     EventBus, SensorClosed, SensorHeard, SensorOpened, SensorSilent, SensorTamper, ZwaveOffline, ZwaveOnline,
@@ -26,8 +26,6 @@ if TYPE_CHECKING:
     from zwave_js_server.model.node import Node
 
 logger = logging.getLogger(__name__)
-URL = "ws://127.0.0.1:3000"
-RECONNECT_DELAY = 5
 CHECK_INTERVAL = 60
 # Seconds without the server before alerting; it needs ~20 s to start.
 OFFLINE_AFTER = 60
@@ -128,38 +126,15 @@ class Sensors:
 
         while True:
             try:
-                await self._session()
+                await zwave.session(self._attach)
             except (BaseZwaveJSServerError, aiohttp.ClientError, OSError) as exc:
                 if self.online is not False:
                     logger.warning("Z-Wave server unreachable (%s); retrying every %ds",
-                                   type(exc).__name__, RECONNECT_DELAY)
+                                   type(exc).__name__, zwave.RECONNECT_DELAY)
             else:
                 logger.warning("Z-Wave server closed the connection")
             self._detach()
-            await asyncio.sleep(RECONNECT_DELAY)
-
-    async def _session(self) -> None:
-        import aiohttp
-        from zwave_js_server.client import Client
-
-        async with aiohttp.ClientSession() as http:
-            client = Client(URL, http)
-            await client.connect()
-            ready = asyncio.Event()
-            listening = asyncio.create_task(client.listen(ready))
-            try:
-                waiting = asyncio.create_task(ready.wait())
-                await asyncio.wait({listening, waiting}, return_when=asyncio.FIRST_COMPLETED)
-                waiting.cancel()
-                if ready.is_set():
-                    assert client.driver is not None
-                    self._attach(client.driver.controller)
-                await listening
-            finally:
-                listening.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await listening
-                await client.disconnect()
+            await asyncio.sleep(zwave.RECONNECT_DELAY)
 
     def _attach(self, controller: Controller) -> None:
         now = self._clock()

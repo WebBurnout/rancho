@@ -8,6 +8,7 @@ from rancho.core.cameras import Cameras
 from rancho.core.config import Config
 from rancho.core.events import EventBus
 from rancho.core.hardware import GpioPowerSensor, GpioSiren
+from rancho.core.lights import Lights
 from rancho.core.photos import PhotoArchive
 from rancho.core.power import PowerMonitor
 from rancho.core.recorder import Recorder
@@ -34,13 +35,14 @@ async def run(config: Config) -> None:
     power.open()
     starlink = StarlinkMonitor(events, power)
     sensors = Sensors(config, events)
+    lights = Lights(config)
     alarm = Alarm(config.state_file, events, open_sensors=sensors.open_sensors)
     alarm.load()
     archive = PhotoArchive(config.state_file.parent / "photos")
     archive.load()
     cameras = Cameras(config, events, archive)
     recorder = Recorder(events, cameras, alarm)
-    telegram = TelegramFrontend(config, events, cameras, alarm, siren, power, starlink, sensors)
+    telegram = TelegramFrontend(config, events, cameras, alarm, siren, power, starlink, sensors, lights)
     workers = {
         asyncio.create_task(siren.run(), name="siren"),
         asyncio.create_task(power.run(), name="power"),
@@ -49,6 +51,7 @@ async def run(config: Config) -> None:
         asyncio.create_task(telegram.run(), name="telegram"),
         asyncio.create_task(cameras.run(), name="cameras"),
         asyncio.create_task(sensors.run(), name="sensors"),
+        asyncio.create_task(lights.run(), name="lights"),
         asyncio.create_task(recorder.run(), name="recorder"),
     }
     stop_task = asyncio.create_task(stop.wait(), name="shutdown")

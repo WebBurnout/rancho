@@ -46,6 +46,7 @@ using it must send messages only.
 | `/estado` | Estado | Mode, since when, who changed it, any alert pause, cameras, and sensors |
 | `/foto` | Foto | Photos from all cameras |
 | `/pausa <hours>` | | Pauses intrusion alerts (default 1, max 24); `/pausa 0` or arming resumes them |
+| `/encender [light]`, `/apagar [light]` | | Switches one light, or all of them, until its next scheduled time (see [Lights](#lights)) |
 | `/ayuda` | | Command list |
 
 Buttons are off: messages are sent without them. To bring them back, set
@@ -210,6 +211,34 @@ sensor's Access Control notification (and its binary report); a change that
 happens while Rancho is disconnected is reported on reconnect. Timings are
 constants in `rancho/core/sensors.py`.
 
+## Lights
+
+Z-Wave relays listed under `lights` in `config.yaml` are switched on a schedule,
+so the house looks lived in. `on_at` and `off_at` are a quoted `"HH:MM"` or
+`dusk` (civil twilight, sun 6° below the horizon, at `location`; needs the
+`astral` package). Each night's times shift randomly by up to `jitter` minutes
+either way (default 30).
+
+```yaml
+location:
+  latitude: 18.95
+  longitude: -98.75
+
+lights:
+  - name: Patio
+    node: 7
+    on_at: dusk
+    off_at: "03:00"
+```
+
+Rancho switches a light at its on and off times, and once at service start to
+match the schedule. Switching it by hand in between, at the relay or with
+`/encender` / `/apagar` (all lights, or `/encender patio`), is left alone until
+the next scheduled time, including across `zwave.service` reconnects. A switch the relay
+doesn't confirm is retried every 30 s. Nothing goes to Telegram; `/estado` lists
+each light: “encendida, se apaga a las 03:12”, “apagada a mano; el horario sigue
+a las 19:04”, or “sin respuesta” when the relay can't be reached.
+
 ## Starlink dish
 
 The dish is on the roof, so its cable could be cut. Every 15 s Rancho opens a TCP
@@ -294,9 +323,11 @@ uv run task zwave rebuild-routes [NODE]  # new routes for every device, or one; 
 devices are done; `zwave.service` does each sleeping sensor at its next wake-up
 (every 4 h), or right away if you remove its cover. Run it again to see
 progress, or add `--follow` to watch until the sensors are done. In `list`,
-“route via 7” is the last route the controller reached the device on (“route
-direct” means no repeater), and the traffic counters reset when
-`zwave.service` restarts.
+“route via 7 (-71 dBm)” is the last route the controller reached the device on
+(“route direct” means no repeater), with how strongly the repeater heard the
+next hop toward the device. `signal` is the controller's average of the last hop
+only. Both update only when the controller sends to the device (at a sensor's
+wake-up). The traffic counters reset when `zwave.service` restarts.
 
 The `zwave` task talks to `zwave.service` (see [INSTALL.md](INSTALL.md#8-z-wave-js-server))
 over its own connection, so Rancho can keep running.

@@ -17,6 +17,7 @@ from rancho.core.events import (
     SensorHeard, SensorIntrusion, SensorSilent, SensorTamper, Sighting, StarlinkOffline, StarlinkOnline,
     ZwaveOffline, ZwaveOnline,
 )
+from rancho.core.lights import LightStatus
 from rancho.core.sensors import SensorStatus
 from rancho.core.state import Alarm, AlarmMode
 from rancho.frontends.telegram import HELP_TEXT, TelegramFrontend
@@ -383,6 +384,41 @@ class AlarmCommandTests(IsolatedAsyncioTestCase):
         self.frontend._sensors.down_at = datetime(2026, 11, 10, 21, 5)
         self.assertIn("\nZ-Wave: sin conexión desde las 21:05\nSensores:", self.frontend._status_text())
         self.assertNotIn("Sensores", self.frontend._status_text(links=False))
+
+    async def test_status_lists_lights(self) -> None:
+        self.frontend._lights = SimpleNamespace(configured=True, status=lambda: [
+            LightStatus("Foco", True, True, False, datetime(2026, 11, 11, 3, 12)),
+            LightStatus("Patio", False, True, False, datetime(2026, 11, 11, 19, 4)),
+            LightStatus("Bomba", False, True, True, datetime(2026, 11, 11, 3, 12)),
+            LightStatus("Pozo", None, True, False, datetime(2026, 11, 11, 3, 12)),
+            LightStatus("Pila", True, False, False, datetime(2026, 11, 11, 3, 12)),
+        ])
+        self.assertTrue(self.frontend._status_text().endswith(
+            "\nLuces:\n  Foco: encendida, se apaga a las 03:12\n  Patio: apagada, se enciende a las 19:04"
+            "\n  Bomba: apagada a mano; el horario sigue a las 03:12\n  Pozo: comprobando…\n  Pila: sin respuesta"
+        ))
+        self.assertNotIn("Luces", self.frontend._status_text(links=False))
+
+    async def test_light_commands(self) -> None:
+        await self.frontend._light_on(self.update(), self.context())
+        self.assertEqual(self.message.reply_text.call_args.args[0], "No hay luces en config.yaml.")
+        switched = []
+
+        async def switch(name: str, on: bool) -> bool:
+            switched.append((name, on))
+            return name != "Pozo"
+
+        self.frontend._lights = SimpleNamespace(configured=True, names=lambda: ["Patio", "Pozo"], switch=switch)
+        await self.frontend._light_on(self.update(), self.context("patio"))
+        self.assertEqual(self.message.reply_text.call_args.args[0], "Patio: encendida hasta su próximo horario")
+        await self.frontend._light_off(self.update(), self.context())
+        self.assertEqual(switched, [("Patio", True), ("Patio", False), ("Pozo", False)])
+        self.assertEqual(self.message.reply_text.call_args.args[0],
+                         "Patio: apagada hasta su próximo horario\nPozo: sin respuesta, no se pudo apagar")
+        await self.frontend._light_on(self.update(), self.context("cocina"))
+        self.assertEqual(self.message.reply_text.call_args.args[0], "No hay una luz «cocina». Luces: Patio, Pozo")
+        await self.frontend._light_on(self.update(chat_id=456), self.context())
+        self.assertEqual(len(switched), 3)
 
     async def test_sleep_broadcasts_and_shows_in_status(self) -> None:
         await self.frontend._pause(self.update(), self.context("1"))

@@ -1,10 +1,11 @@
 """Offline config tests using temporary files."""
 
+from datetime import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from rancho.core.config import CameraConfig, SensorConfig, load_devices, load_config
+from rancho.core.config import CameraConfig, Devices, LightConfig, Location, SensorConfig, load_devices, load_config
 
 
 class ConfigYamlTests(TestCase):
@@ -24,10 +25,15 @@ class ConfigYamlTests(TestCase):
         self.path.write_text(text, encoding="utf-8")
         return load_devices(self.path)[1]
 
+    def load_lights(self, text: str) -> Devices:
+        self.path.write_text(text, encoding="utf-8")
+        return load_devices(self.path)
+
     def test_committed_file_is_valid(self) -> None:
-        cameras, sensors = load_devices(Path(__file__).parent.parent / "config.yaml")
-        self.assertTrue(cameras)
-        self.assertTrue(sensors)
+        devices = load_devices(Path(__file__).parent.parent / "config.yaml")
+        self.assertTrue(devices.cameras)
+        self.assertTrue(devices.sensors)
+        self.assertTrue(devices.lights)
 
     def test_reads_names_and_hosts_in_order(self) -> None:
         cameras = self.load(
@@ -52,12 +58,12 @@ class ConfigYamlTests(TestCase):
                 self.load(f"cameras:\n  - name: Bomba\n    host: 10.10.0.11\n    alerts: {alerts}\n")
 
     def test_missing_file_means_no_devices(self) -> None:
-        self.assertEqual(load_devices(self.path), ((), ()))
+        self.assertEqual(load_devices(self.path), Devices())
 
     def test_either_list_may_be_missing(self) -> None:
         self.assertEqual(self.load("sensors:\n  - name: Cocina\n    node: 4\n"), ())
         self.assertEqual(self.load_sensors("cameras:\n  - name: Patio\n    host: 10.10.0.12\n"), ())
-        self.assertEqual(load_devices(self.path), ((CameraConfig("Patio", "10.10.0.12"),), ()))
+        self.assertEqual(load_devices(self.path), Devices(cameras=(CameraConfig("Patio", "10.10.0.12"),)))
 
     def test_reads_sensors_in_order(self) -> None:
         sensors = self.load_sensors(
@@ -81,6 +87,37 @@ class ConfigYamlTests(TestCase):
         for label, text in cases.items():
             with self.subTest(label), self.assertRaises(ValueError):
                 self.load_sensors(text)
+
+    def test_reads_lights_and_location(self) -> None:
+        devices = self.load_lights(
+            "location:\n  latitude: 20.5\n  longitude: -103\n"
+            "lights:\n  - name: Foco\n    node: 7\n    on_at: dusk\n    off_at: '03:00'\n"
+            "  - name: Patio\n    node: 8\n    on_at: '19:30'\n    off_at: '6:05'\n    jitter: 0\n"
+        )
+        self.assertEqual(devices.location, Location(20.5, -103.0))
+        self.assertEqual(devices.lights, (
+            LightConfig("Foco", 7, "dusk", time(3, 0)), LightConfig("Patio", 8, time(19, 30), time(6, 5), jitter=0),
+        ))
+
+    def test_invalid_lights_are_rejected(self) -> None:
+        light = "lights:\n  - name: Foco\n    node: 7\n"
+        cases = {
+            "missing off": light + "    on_at: '19:00'\n",
+            "unquoted time": light + "    on_at: 19:00\n    off_at: '03:00'\n",
+            "bad time": light + "    on_at: '25:00'\n    off_at: '03:00'\n",
+            "same times": light + "    on_at: '03:00'\n    off_at: '03:00'\n",
+            "bad jitter": light + "    on_at: '19:00'\n    off_at: '03:00'\n    jitter: -5\n",
+            "unknown key": light + "    on_at: '19:00'\n    off_at: '03:00'\n    dim: 50\n",
+            "dusk without location": light + "    on_at: dusk\n    off_at: '03:00'\n",
+            "node is a sensor": "sensors:\n  - name: Cocina\n    node: 7\n" + light + "    on_at: '19:00'\n    off_at: '03:00'\n",
+            "duplicate node": light + "    on_at: '19:00'\n    off_at: '03:00'\n  - name: Otro\n    node: 7\n"
+                              "    on_at: '19:00'\n    off_at: '03:00'\n",
+            "bad location": "location:\n  latitude: 120\n  longitude: 0\n",
+            "partial location": "location:\n  latitude: 20\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label), self.assertRaises(ValueError):
+                self.load_lights(text)
 
     def test_load_config_reads_file_next_to_env(self) -> None:
         (self.dir / ".env").write_text("", encoding="utf-8")
