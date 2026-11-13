@@ -13,7 +13,7 @@ cameras:
   - name: Bomba
     host: 10.10.0.10
     # Something has been leaving droppings by the pump.
-    alerts: [person, animal]
+    # alerts: [person, animal]
   - name: Puerta
     host: 10.10.0.12
   - name: Cocina
